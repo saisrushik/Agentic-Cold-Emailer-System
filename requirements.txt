@@ -16,3 +16,4 @@ pydantic
 google-generativeai
 ipykernel
 openpyxl
+PyMuPDF
