@@ -79,5 +79,7 @@ class ResumeReader:
             "scholar":  next((l for l in web_links if "scholar.google.com" in l), None),
         }
 
+        return links_dict
+
 
     
