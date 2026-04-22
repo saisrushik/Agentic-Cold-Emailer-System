@@ -10,3 +10,4 @@ wheels/
 .venv
 .env 
 Data/
+test_code.ipynb

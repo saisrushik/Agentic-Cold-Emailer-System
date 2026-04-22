@@ -2,6 +2,7 @@ from langchain_community.document_loaders import PyMuPDFLoader
 import pymupdf as fitz  # PyMuPDF >= 1.24
 import os
 import re
+from urllib.parse import unquote
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,8 +68,16 @@ class ResumeReader:
 
 
     def extract_contact_info(self, resume_data):
-        web_links = [link for link in resume_data[0].metadata['hyperlinks'] if link.startswith("http")]
-        mail_links = [l for l in resume_data[0].metadata['hyperlinks'] if l.startswith("mailto:")]
+        """Collect hyperlinks from ALL pages and extract contact details."""
+        all_links = []
+        for doc in resume_data:
+            all_links.extend(doc.metadata.get("hyperlinks", []))
+
+        if not all_links:
+            return {}
+
+        web_links = [link for link in all_links if link.startswith("http")]
+        mail_links = [link for link in all_links if link.startswith("mailto:")]
 
         links_dict = {
             "email":    self.extract_email(mail_links),

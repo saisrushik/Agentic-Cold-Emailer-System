@@ -1,227 +1,275 @@
-# Agentic Cold Emailer System Design
+# Agentic Cold Emailer System — System Design
 
 ## Overview
-This document describes a design for an agentic cold email system that:
-- reads HR contact data from Excel
-- ingests an uploaded resume
-- builds a profile knowledge base in Chroma
-- creates a RAG pipeline for context-aware email generation
-- supports multiple LLM providers
-- uses Streamlit for UI
-- uses Langchain, LangSmith, and LangGraph for orchestration and tracing
+
+An agentic cold email system that:
+- Reads HR contact data from a CSV file (`email.csv`)
+- Ingests an uploaded PDF resume, extracts full text and embedded hyperlinks
+- Derives contact info (email, phone, LinkedIn, GitHub, Portfolio, Scholar) from those hyperlinks
+- Stores the parsed resume in Streamlit session state for downstream use
+- Will build a RAG pipeline for context-aware, personalised email generation
+- Supports multiple LLM providers selectable at runtime
+- Uses Streamlit for the UI
+- Uses LangChain, LangSmith, and LangGraph for orchestration and tracing
 
 ---
 
 ## Goals
-- Automatically generate personalized cold emails to HR / HR teams
-- Use uploaded resume and profile details as the knowledge source
-- Enable provider selection for LLM inference
-- Track agent execution and data flow with LangSmith
-- Build a modular, maintainable system with streamlit UI
+
+- Automatically generate personalized cold emails to HR contacts
+- Use the uploaded resume as the primary knowledge source
+- Enable LLM provider selection at runtime (OpenAI, Ollama, Groq, Ollama-cloud)
+- Track agent execution with LangSmith
+- Build a modular, maintainable system using a proper Python package structure
+
+---
+
+## Current Project Structure
+
+```
+Agentic Cold Emailer System/
+├── .env                          # API keys (LANGSMITH_API_KEY, provider keys)
+├── .python-version               # Python version pin
+├── main.py                       # Entrypoint placeholder
+├── pyproject.toml                # Project metadata & dependencies
+├── requirements.txt              # Pip-installable dependencies
+│
+├── Data/                         # Sample data files
+│   ├── email.csv                 # HR contacts (HR Name, Email, Company, Hiring Role, …)
+│   ├── Resume - ML.pdf           # Sample resume (PDF)
+│   └── Resume - ML.docx          # Sample resume (DOCX)
+│
+├── data_injection/               # Python package — data ingestion layer
+│   ├── __init__.py               # Re-exports ResumeReader
+│   ├── resume_reader.py          # PDF loader + hyperlink extractor (IMPLEMENTED)
+│   └── excel_csv.py              # CSV/Excel reader + column extractors (IMPLEMENTED)
+│
+├── rag_pipeline/                 # Python package — RAG layer (PENDING)
+│   └── __init__.py
+│
+├── emailer_agent/                # Python package — agent + email layer (PENDING)
+│   └── __init__.py
+│
+└── frontend/                     # Python package — Streamlit UI
+    ├── __init__.py
+    └── app.py                    # Main Streamlit application (IMPLEMENTED)
+```
 
 ---
 
 ## High-Level Architecture
 
-1. **Data Ingestion**
-   - Read HR contact information from Excel.
-   - Read resume upload and optionally parse it into sections.
-   - Store profile details in a vector store (Chroma) after embedding.
-
-2. **Vector Storage**
-   - Use Chroma to persist resume/profile embeddings.
-   - Index resume text and optionally candidate metadata.
-
-3. **RAG Pipeline**
-   - Use Langchain to build a retrieval chain.
-   - Use a retriever over Chroma to fetch relevant profile context for each email.
-   - Construct prompts that merge HR contact details + candidate profile.
-
-4. **Agentic Workflow**
-   - Use LangGraph to define an agentic graph of actions.
-   - Agents can perform steps: validate email data, retrieve context, generate a draft, and optionally send or preview.
-   - Use LangSmith for tracing executions, prompts, responses, and observability.
-
-5. **UI with Streamlit**
-   - Upload Excel file containing HR email addresses and company details.
-   - Upload resume file.
-   - Enter profile details, job target, and email preferences.
-   - Select LLM provider and model.
-   - Review and approve generated emails.
-   - Track logs, status, and action history.
-
-6. **LLM Provider Support**
-   - Support providers such as OpenAI, Azure OpenAI, Anthropic, Hugging Face, or local models.
-   - Allow selecting provider at runtime from Streamlit dropdown.
-   - Keep provider configuration modular.
+```
+┌──────────────┐     ┌──────────────────────┐     ┌───────────────────┐
+│   Streamlit  │────▶│   data_injection      │────▶│   rag_pipeline    │
+│   frontend   │     │  ResumeReader         │     │  (vector store +  │
+│   (app.py)   │     │  excel_csv            │     │   retrieval chain)│
+└──────┬───────┘     └──────────────────────┘     └────────┬──────────┘
+       │                                                    │
+       │ session_state                                      ▼
+       │  - resume_data                          ┌───────────────────┐
+       │  - contact_info                         │  emailer_agent    │
+       │  - llm_provider                         │  (LangGraph DAG)  │
+       └────────────────────────────────────────▶└────────┬──────────┘
+                                                          │
+                                              ┌───────────▼──────────┐
+                                              │  LLM Provider        │
+                                              │  OpenAI / Groq /     │
+                                              │  Ollama / Ollama-    │
+                                              │  cloud               │
+                                              └──────────────────────┘
+```
 
 ---
 
-## Component Breakdown
+## Implemented Components
 
-### 1. Data Ingestion
-- `excel_reader.py`
-  - Read Excel using `pandas.read_excel`.
-  - Validate columns like `name`, `email`, `company`, `role`, `notes`.
-- `resume_parser.py`
-  - Accept uploaded resume file.
-  - Optionally parse text from PDF or DOCX.
-  - Normalize profile sections.
+### 1. `data_injection/resume_reader.py` — `ResumeReader`
 
-### 2. Embedding & Vector Store
-- `vector_store.py`
-  - Use Langchain `Chroma` vector store.
-  - Embed resume/profile text using the selected LLM provider's embedding model.
-  - Store metadata for retrieval.
-- Candidate profile is represented as:
-  - education
-  - experience
-  - skills
-  - certifications
-  - career goals
+Loads a PDF resume and enriches it with embedded hyperlinks.
 
-### 3. RAG Pipeline
-- `rag_chain.py`
-  - Build a `RetrievalQA` or `RetrievalQAWithSources` chain.
-  - Use retriever from Chroma.
-  - Add prompt templates for personalized email generation.
-- Prompt structure:
-  - HR recipient name/company details
-  - candidate summary from resume
-  - target role and value proposition
-  - call-to-action and contact details
+| Method | Description |
+|---|---|
+| `read_resume(file_path)` | Uses `PyMuPDFLoader` (LangChain) to load one `Document` per page. Then uses `PyMuPDF` (`fitz`) directly to extract all hyperlinks per page and appends them to `page_content` and `metadata["hyperlinks"]`. Returns `list[Document]` or `None`. |
+| `extract_email(mailto_links)` | Decodes `mailto:` URIs with `urllib.parse.unquote` and extracts email address via regex. |
+| `extract_phone(mailto_links)` | Decodes `mailto:` URIs and extracts phone number via regex. |
+| `extract_contact_info(resume_data)` | Aggregates hyperlinks from **all pages** (not just page 0). Separates `http` and `mailto:` links, then extracts: email, phone, LinkedIn, GitHub, portfolio (sites.google.com), Google Scholar. Returns a `dict`. |
 
-### 4. Agent-Orchestration
-- `agent_graph.py`
-  - Define nodes for tasks: `load_contacts`, `embed_profile`, `retrieve_context`, `generate_email`, `preview_email`, `send_email`.
-  - Connect steps with LangGraph.
-- `agent_runner.py`
-  - Execute the graph.
-  - Use LangSmith tracing for each agent step.
-
-### 5. Streamlit UI
-- `app.py`
-  - UI components:
-    - file uploader for Excel
-    - file uploader for resume
-    - text input for profile details
-    - select box for LLM provider and model
-    - button for `Generate Emails`
-    - preview panel for generated drafts
-    - send/queue controls
-  - Show execution trace and results.
-
-### 6. Provider Selection
-- `provider_config.py`
-  - Maintain provider configurations in a central place.
-  - Example providers:
-    - `openai`: `gpt-4.1-mini`, `gpt-4o-mini`
-    - `azure_openai`: `gpt-4.1-mini`
-    - `anthropic`: `claude-3-mini`
-    - `local`: any compatible local LLM
-- Use an adapter or factory to select the `LLM` and `Embedding` classes dynamically.
+**Key design decisions:**
+- Dual-pass approach: LangChain loader for text, PyMuPDF for hyperlinks
+- Hyperlinks collected across ALL pages (not just the first)
+- Graceful degradation: missing hyperlinks return empty dict, not an exception
 
 ---
 
-## Suggested File Structure
+### 2. `data_injection/excel_csv.py` — CSV/Excel helpers
 
-- `app.py`
-- `excel_reader.py`
-- `resume_parser.py`
-- `vector_store.py`
-- `rag_chain.py`
-- `agent_graph.py`
-- `provider_config.py`
-- `langsmith_tracker.py`
-- `requirements.txt`
-- `Agentic_Cold_Emailer_System_Design.md`
+Standalone functions to read and extract columns from HR contact spreadsheets.
+
+| Function | Returns |
+|---|---|
+| `read_csv(file_path)` | `pd.DataFrame` |
+| `get_hr_names(df)` | `list` from column `HR Name` |
+| `get_emails(df)` | `list` from column `Email` |
+| `get_companies(df)` | `list` from column `Company` |
+| `get_hiring_roles(df)` | `list` from column `Hiring Role` |
+| `get_last_email_sent_dates(df)` | `list` from column `Last Email Sent Date` |
+| `get_callback_status(df)` | `list` from column `Received Callback` |
+
+**Expected CSV schema:**
+
+| Column | Description |
+|---|---|
+| `HR Name` | Recipient name |
+| `Email` | HR email address |
+| `Company` | Company name |
+| `Hiring Role` | Role being hired for |
+| `Last Email Sent Date` | Date of last outreach |
+| `Received Callback` | Boolean / status |
 
 ---
 
-## Example Flow
+### 3. `frontend/app.py` — Streamlit UI
 
-1. User opens Streamlit UI.
-2. Uploads resume and Excel with HR contacts.
-3. Chooses an LLM provider.
-4. Enters optional profile summary and target job details.
-5. System embeds resume/profile into Chroma.
-6. System reads each contact from Excel.
-7. For each recipient, the agent retrieves profile context and generates a personalized email.
-8. User previews all drafts.
-9. User confirms and optionally exports or sends emails.
+Entry point: `streamlit run frontend/app.py` (from project root)
+
+#### Session State Keys
+
+| Key | Type | Description |
+|---|---|---|
+| `_initialised` | `bool` | Sentinel — set on first load of a browser session; ensures state is wiped on page refresh |
+| `resume_data` | `list[Document] \| None` | Parsed resume pages from `ResumeReader.read_resume()` |
+| `contact_info` | `dict \| None` | Extracted contact details from `ResumeReader.extract_contact_info()` |
+| `llm_provider` | `str` | Selected LLM provider (`"Groq"` default) |
+
+#### Sidebar Behaviour
+
+| State | What the user sees |
+|---|---|
+| No resume loaded | `st.file_uploader` accepting PDF — file is saved to a temp path, parsed, then temp file deleted |
+| Resume loaded | Green banner "📄 Resume loaded in session ✔" + **🗑️ Discard Resume** button |
+| Discard clicked | `resume_data` and `contact_info` cleared → `st.rerun()` → back to uploader |
+
+> Only one resume can be loaded at a time. The uploader is hidden once a resume is in session state, preventing accidental re-upload.
+
+#### Main Area Layout
+
+```
+┌────────────────────────────┬──────────────────────┐
+│  📋 Resume Preview          │  🔗 Extracted Contact │
+│  (one expander per page,   │  (one expander — View │
+│   collapsed by default)    │   Contact Details)    │
+└────────────────────────────┴──────────────────────┘
+```
+
+- **LLM Provider selector** in sidebar — `st.selectbox` with options: `OpenAI`, `Ollama`, `Groq`, `Ollama-cloud`
+- Provider chip displayed below the dropdown for quick visibility
+- LangSmith tracing configured via `LANGSMITH_API_KEY` from `.env`
+
+---
+
+## Pending Components
+
+### `rag_pipeline/` — Vector Store & Retrieval
+
+Planned implementation:
+
+- `vector_store.py` — Embed resume `Document` objects into Chroma using the selected provider's embedding model
+- `rag_chain.py` — `RetrievalQA` chain that retrieves candidate context per HR contact and generates a personalised email prompt
+
+### `emailer_agent/` — LangGraph Agent
+
+Planned implementation:
+
+- `agent_graph.py` — LangGraph DAG with nodes:
+  - `load_contacts` → read HR CSV
+  - `embed_profile` → embed resume into Chroma
+  - `retrieve_context` → retrieve relevant resume chunks per recipient
+  - `generate_email` → call LLM with prompt template
+  - `preview_email` → display draft in Streamlit
+  - `send_email` *(optional)* → SMTP / transactional API
+- `agent_runner.py` — Execute graph with LangSmith tracing per step
+
+---
+
+## Example User Flow (Current)
+
+1. User opens Streamlit UI at `http://localhost:8501`
+2. Selects LLM provider from the sidebar dropdown
+3. Uploads a PDF resume — parsed and stored in `session_state.resume_data`
+4. Contact info (email, phone, LinkedIn, etc.) auto-extracted and shown in "Extracted Contact Info" expander
+5. Resume text visible page-by-page in "Resume Preview" expanders
+
+## Example User Flow (Target — End-to-End)
+
+1–4. Same as above
+5. System embeds resume into Chroma vector store
+6. User uploads `email.csv` with HR contacts
+7. For each HR contact, agent retrieves relevant resume context and generates a cold email
+8. User previews all drafts in the UI
+9. User confirms and sends / exports emails
 
 ---
 
 ## LangSmith & Tracing
-- Use LangSmith to track:
-  - prompt templates
-  - model responses
-  - retriever queries
-  - execution states for LangGraph nodes
-- Benefits:
-  - debug prompt quality
-  - inspect retrieval relevance
-  - measure provider performance
+
+- `LANGSMITH_API_KEY` and `LANGSMITH_TRACING=true` set in `.env` and loaded at startup
+- Will be used to trace:
+  - Prompt templates sent to LLM
+  - Retriever queries and returned chunks
+  - LangGraph node execution states
+  - Model responses and latency
 
 ---
 
-## Enhancements & Improvements
+## LLM Provider Support
 
-### 1. Email Sending Integration
-- Add support for SMTP or transactional email APIs (SendGrid, Mailgun, Gmail API).
-- Include sending throttling and rate-limiting.
-- Add send-status reporting, bounce handling, and retry loops.
+| Provider | Status | Notes |
+|---|---|---|
+| `Groq` | Default selection | Fast inference, good for drafting |
+| `OpenAI` | Selectable | `gpt-4.1-mini`, `gpt-4o-mini` |
+| `Ollama` | Selectable | Local model, no API key required |
+| `Ollama-cloud` | Selectable | Cloud-hosted Ollama endpoint |
 
-### 2. Personalization & Safety
-- Add a personalization layer that uses recipient company mission, role, and pain points.
-- Use a content filter / safety step before sending.
-- Add disallowed phrase detection to prevent spammy wording.
-
-### 3. Profile Enrichment
-- Enrich the profile using structured data from LinkedIn or parsed resume sections.
-- Add skill keyword extraction, summary generation, and achievements highlighting.
-- Store enriched metadata in Chroma for better retrieval.
-
-### 4. Conversation Tracking
-- Capture replies and follow-up history if using an email send integration.
-- Add a follow-up scheduler and pipeline for sequential outreach.
-
-### 5. Provider & Cost Management
-- Allow cost-aware provider selection, e.g. low-cost preview mode and higher-quality send mode.
-- Track token usage and prompt length.
-- Cache embeddings and common prompts to reduce repeated cost.
-
-### 6. Monitoring & Metrics
-- Add dashboard metrics: emails generated, emails sent, success rate, average response time.
-- Track LangSmith traces for quality drift and prompt performance.
+Provider selection is stored in `session_state.llm_provider` and will be used to instantiate the correct LangChain LLM and embedding objects.
 
 ---
 
-## Recommended Technologies
-- Langchain: orchestration, prompts, retrieval
-- LangGraph: agentic step definition and workflow control
-- LangSmith: tracing, prompt logging, execution metadata
-- Chroma: vector store for resume/profile data
-- Streamlit: UI for upload, preview, and control
-- Pandas / OpenPyXL: Excel ingestion
-- PyPDF2 / python-docx: optional resume parsing
-- SMTP / transactional email API: email delivery
+## Technologies Used
+
+| Library | Purpose |
+|---|---|
+| `streamlit` | UI — upload, preview, provider selection |
+| `langchain-community` | `PyMuPDFLoader` for PDF ingestion |
+| `pymupdf` (`fitz`) | Hyperlink extraction from PDF |
+| `pandas` | CSV/Excel reading |
+| `python-dotenv` | Environment variable loading |
+| `langsmith` | Agent tracing and observability |
+| `langchain` | Prompt templates, retrieval chains *(planned)* |
+| `langgraph` | Agentic DAG workflow *(planned)* |
+| `chromadb` | Vector store for resume embeddings *(planned)* |
 
 ---
 
 ## Next Steps
-1. Define the exact Excel columns and resume schema.
-2. Build the Streamlit upload and provider-selection UI.
-3. Implement Chroma ingestion and LLM provider abstraction.
-4. Create the LangGraph workflow and connect it to LangSmith.
-5. Add email preview, export, and send integration.
-6. Evaluate quality and improve prompts with a small test set.
+
+1. ✅ Build Streamlit UI with LLM provider selection and resume upload
+2. ✅ Implement `ResumeReader` with hyperlink extraction
+3. ✅ Implement `excel_csv.py` with HR contact column extractors
+4. ✅ Refactor into proper Python package structure (`data_injection/`, `rag_pipeline/`, `emailer_agent/`, `frontend/`)
+5. ⬜ Implement `rag_pipeline/vector_store.py` — embed resume into Chroma
+6. ⬜ Implement `rag_pipeline/rag_chain.py` — retrieval chain for email context
+7. ⬜ Implement `emailer_agent/agent_graph.py` — LangGraph DAG
+8. ⬜ Add Excel/CSV upload to the Streamlit UI
+9. ⬜ Add email preview, approval, and send integration
+10. ⬜ Evaluate and iterate on prompt quality using LangSmith traces
 
 ---
 
 ## Notes
-- Keep provider credentials secure and configurable via environment variables.
-- Use separate Chroma collections if you want multiple candidate profiles.
-- Validate email addresses before sending.
-- Keep prompt templates versioned so LangSmith can trace prompt changes.
- 
+
+- Keep all API keys in `.env` — never commit them to git
+- Session state is fully cleared on browser refresh (sentinel `_initialised` pattern)
+- Only one resume can be loaded at a time — discard before re-uploading
+- Validate email addresses from CSV before sending
+- Keep prompt templates versioned so LangSmith can track prompt changes over time
