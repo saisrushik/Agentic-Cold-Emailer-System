@@ -1,9 +1,15 @@
-import os
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_ollama import OllamaEmbeddings
+# from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_pinecone import PineconeVectorStore
 from pinecone import Pinecone
 from pinecone import ServerlessSpec
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN", "")
 
 
 class VectoreStore:
@@ -25,7 +31,8 @@ class VectoreStore:
         splits = splitter.split_documents(self.docs)
 
         # embeddings
-        embeddings = OllamaEmbeddings(model="embeddinggemma:300m")
+        # embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+        embeddings = OllamaEmbeddings(model="all-MiniLM-L6-v2")
         
         # vectore store
         # Make sure to set PINECONE_API_KEY in your .env file
@@ -42,12 +49,17 @@ class VectoreStore:
             return None
         
         pc = Pinecone(api_key=api_key)
+
+        #delete old index
+        if pc.has_index(index_name):
+            pc.delete_index(index_name)
+            print(f"Deleted old index {index_name}")
         
         # Create pinecone index if it doesn't exist
         if not pc.has_index(index_name):
             pc.create_index(
                 name=index_name,
-                dimension=768,
+                dimension=384,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
