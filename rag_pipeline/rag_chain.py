@@ -4,6 +4,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.messages import SystemMessage
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -30,7 +31,7 @@ class ColdEmail(BaseModel):
     subject: str = Field(description="Email subject line — concise and attention-grabbing")
     greeting: str = Field(
         description=(
-            "Greeting line. If the recipient is a named person use 'Dear {name},' "
+            "Greeting line. If the recipient is a named person use 'Dear <name>,' "
             "(e.g., 'Dear Priya,'). If the recipient is a team or the name looks like a "
             "team/department, use 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,'."
         )
@@ -381,7 +382,7 @@ class EmailGenerator:
                 "Guidelines:\n"
                 "- GREETING RULES (critical):\n"
                 "  * If there is exactly ONE recipient and the name is a person's name "
-                "(e.g., 'Priya', 'John', 'Rahul Sharma'), use 'Dear {name},' (e.g., 'Dear Priya,').\n"
+                "(e.g., 'Priya', 'John', 'Rahul Sharma'), use 'Dear <name>,' (e.g., 'Dear Priya,').\n"
                 "  * If the name looks like a team or department "
                 "(e.g., 'HR Team', 'Talent Acquisition', 'Recruitment Team'), "
                 "use 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,'.\n"
@@ -405,7 +406,7 @@ class EmailGenerator:
             )
 
             prompt = ChatPromptTemplate.from_messages([
-                ("system", system_prompt),
+                SystemMessage(content=system_prompt),
                 ("human", "{input}"),
             ])
 
