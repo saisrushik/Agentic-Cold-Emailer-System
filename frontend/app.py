@@ -3,13 +3,18 @@ import os
 import sys
 import tempfile
 from dotenv import load_dotenv
+from langchain_community.chat_message_histories import ChatMessageHistory
+from langchain_core.chat_history import BaseChatMessageHistory
+from langchain_core.runnables.history import RunnableWithMessageHistory
 
 # ── make project root importable ──────────────────────────────────────
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from data_injection.resume_reader import ResumeReader  # noqa: E402
+from rag_pipeline.vector_store import VectorStore
+from rag_pipeline.rag_chain import RagChain
+from data_injection.resume_reader import ResumeReader
 
 load_dotenv()
 
@@ -132,6 +137,17 @@ if "_initialised" not in st.session_state:
     st.session_state.resume_data = None
     st.session_state.contact_info = None
     st.session_state.llm_provider = "Groq"
+    st.session_state.model_params = {
+    "model": None,
+    "temperature": None,
+    "max_tokens": None,
+    "max_retries": None,
+}
+st.session_state.vector_store_db = None
+st.session_state.vector_store_retriever = None
+st.session_state.session_id = "default_session"
+st.session_state.store = {}
+
 
 # ══════════════════════  SIDEBAR  ══════════════════════════════════════
 with st.sidebar:
@@ -147,10 +163,40 @@ with st.sidebar:
         help="Choose the LLM backend that will power the cold-email agent.",
     )
     st.session_state.llm_provider = selected_provider
+
+
     st.markdown(
         f'<span class="provider-chip">{selected_provider}</span>',
         unsafe_allow_html=True,
     )
+
+    if selected_provider == "OpenAI":
+        api_key=st.text_input("Enter your OpenAI API key:",type="password")
+
+    # ── Model parameters section ────────────────────────────────────────────────
+    st.markdown("### ⚙️ Set Model Parameters")
+    
+    model_options={
+            "openai": ["gpt-4o","gpt-4.1"],
+            "groq":["openai/gpt-oss-120b", "llama-3.3-70b-versatile", "qwen/qwen3-32b"],
+            "ollama": ["gemma4:latest", "gemma4:31b"],
+            "ollama-cloud":["gemma4:31b-cloud", "deepseek-v3.2:cloud", "gpt-oss:120b-cloud"]
+        }
+    
+    if st.session_state.llm_provider=="OpenAI":
+        st.session_state.model_params["model"]=st.selectbox("Select OpenAI Model",options=model_options["openai"],index=0)
+    elif st.session_state.llm_provider=="Groq":
+        st.session_state.model_params["model"]=st.selectbox("Select Groq Model",options=model_options["groq"],index=0)
+    elif st.session_state.llm_provider=="Ollama":
+        st.session_state.model_params["model"]=st.selectbox("Select Ollama Model",options=model_options["ollama"],index=0)
+    elif st.session_state.llm_provider=="Ollama-cloud":
+        st.session_state.model_params["model"]=st.selectbox("Select Ollama-Cloud Model",options=model_options["ollama-cloud"],index=0)
+    
+    st.session_state.model_params["temperature"]=st.slider("Set Temperature",min_value=0.0,max_value=1.0,value=0.3,step=0.1)
+    
+    st.session_state.model_params["max_tokens"]=st.number_input("Set Max Tokens",min_value=128,max_value=4096,value=1024,step=128)
+    
+    st.session_state.model_params["max_retries"]=st.number_input("Set Max Retries",min_value=0,max_value=5,value=2,step=1)
 
     # ── Resume section ────────────────────────────────────────────────
     st.markdown("### 📄 Upload Resume")
@@ -208,6 +254,32 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+
+# ── Create Vector Store DB Embeddings ────────────────────────────────────────────────────
+
+if st.session_state.vector_store_db is None and st.session_state.resume_data is not None:
+     with st.spinner("💾 Creating Embeddings in Vector DB …"):
+        vectore_instance = VectorStore(st.session_state.resume_data)
+
+         #create vector store db
+        vector_store_db = vectore_instance.create_vector_store()
+        st.session_state.vectorstore_db = vector_store_db
+            
+        #create vector store retriever
+        vector_store_retriever = vector_store_db.as_retriever()
+        st.session_state.vector_store_retriever = vector_store_retriever
+            
+        st.success("✅ Vector Store Created Successfully!")
+
+
+# ── Build RAG Chain with message history and memory ────────────────────────────────────────────────────
+
+def get_session_history(session:str)->BaseChatMessageHistory:
+    if st.session_state.session_id not in st.session_state.store:
+        st.session_state.store[st.session_state.session_id]=ChatMessageHistory()
+    return st.session_state.store[st.session_state.session_id]    
+
+
 col1, col2 = st.columns([2, 1])
 
 # ── Resume Preview ────────────────────────────────────────────────────
@@ -219,6 +291,33 @@ with col1:
                 st.markdown(doc.page_content)
     else:
         st.info("⬅️ Upload your resume from the sidebar to get started.")
+    
+    if st.session_state.vector_store_db is not None and st.session_state.vector_store_retriever is not None:
+        rag_chain_instance = RagChain(
+            model_params=st.session_state.model_params,
+            vector_store_retriever=st.session_state.vector_store_retriever
+            )
+
+        rag_chain = rag_chain_instance.get_rag_chain()
+
+        conversational_rag_chain = RunnableWithMessageHistory(
+                rag_chain,get_session_history,
+                input_messages_key="input",
+                history_messages_key="chat_history",
+            output_messages_key="answer"
+            )
+    
+    user_input = st.text_input("Your question:")
+    if user_input:
+        session_history = get_session_history(st.session_state.session_id)
+        response = conversational_rag_chain.invoke(
+            {"input": user_input},
+            config={
+                "configurable": {"session_id":st.session_state.session_id}
+            },
+        )
+        st.write(st.session_state.store)
+        st.write("Assistant:", response['answer'])
 
 # ── Contact Info ──────────────────────────────────────────────────────
 with col2:

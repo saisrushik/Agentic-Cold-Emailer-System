@@ -19,6 +19,5 @@ streamlit
 langchain_chroma
 faiss-cpu
 pinecone-client
-langchain_pinecone
+langchain-pinecone
 pydantic
-sentence-transformers

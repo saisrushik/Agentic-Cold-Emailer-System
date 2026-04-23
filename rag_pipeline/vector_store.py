@@ -12,13 +12,13 @@ load_dotenv()
 os.environ["HF_TOKEN"] = os.getenv("HF_TOKEN", "")
 
 
-class VectoreStore:
+class VectorStore:
     def __init__(self, docs):
         self.docs = docs
-        self.vectore_store_db = None
+        self.vector_store_db = None
     
     
-    def create_vectore_store(self):
+    def create_vector_store(self):
 
         #splitter
         splitter = RecursiveCharacterTextSplitter(
@@ -32,9 +32,9 @@ class VectoreStore:
 
         # embeddings
         # embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        embeddings = OllamaEmbeddings(model="all-MiniLM-L6-v2")
+        embeddings = OllamaEmbeddings(model="llama3.2:latest")
         
-        # vectore store
+        # vector store
         # Make sure to set PINECONE_API_KEY in your .env file
         api_key = os.environ.get("PINECONE_API_KEY")
         index_name = os.environ.get("PINECONE_INDEX_NAME", "resume-embeddings")
@@ -59,7 +59,7 @@ class VectoreStore:
         if not pc.has_index(index_name):
             pc.create_index(
                 name=index_name,
-                dimension=384,
+                dimension=3072,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
@@ -79,22 +79,33 @@ class VectoreStore:
         except Exception as e:
             print(f"Note: Could not clear index: {e}")
 
-        self.vectore_store_db = PineconeVectorStore.from_documents(
+        self.vector_store_db = PineconeVectorStore.from_documents(
             documents=splits,
             embedding=embeddings,
             index_name=index_name
         )
 
-        return self.vectore_store_db
+        return self.vector_store_db
+    
+    def vector_store_retriever(self):
+        try:
+            if self.vector_store_db is None:
+                raise ValueError("Vector store not initialized. Please create it first.")
+            
+            retriever = self.vector_store_db.as_retriever()
+            return retriever
+        except Exception as e:
+            print(e)
+            return None
         
     
     def similarity_search_with_score(self, query, k=5, score_threshold=0.5):
         try:
-            if self.vectore_store_db is None:
+            if self.vector_store_db is None:
                 raise ValueError("Vector store not initialized. Please create it first.")
             
             # perform similarity search
-            results = self.vectore_store_db.similarity_search_with_score(query, k=k, score_threshold=score_threshold)
+            results = self.vector_store_db.similarity_search_with_score(query, k=k, score_threshold=score_threshold)
             return results    
 
         except Exception as e:
