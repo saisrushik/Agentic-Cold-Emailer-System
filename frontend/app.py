@@ -3,18 +3,17 @@ import os
 import sys
 import tempfile
 from dotenv import load_dotenv
-from langchain_community.chat_message_histories import ChatMessageHistory
-from langchain_core.chat_history import BaseChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
 
 # ── make project root importable ──────────────────────────────────────
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
+from rag_pipeline.rag_chain import RagChain, EmailGenerator, ColdEmail, EmailBatch, QueryFilter
 from rag_pipeline.vector_store import VectorStore
-from rag_pipeline.rag_chain import RagChain
 from data_injection.resume_reader import ResumeReader
+from data_injection.excel_csv import ExcelCsvReader
 
 load_dotenv()
 
@@ -24,7 +23,7 @@ os.environ["LANGSMITH_TRACING"] = "true"
 # ── Page config ───────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Cold Emailing Agent",
-    page_icon="🤖",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -130,34 +129,38 @@ st.markdown(
 )
 
 # ── Session-state: initialise once per browser session ───────────────
-# Using a sentinel key ensures all state is fresh on every new browser
-# session (page refresh), while still surviving widget-triggered reruns.
 if "_initialised" not in st.session_state:
     st.session_state._initialised = True
     st.session_state.resume_data = None
     st.session_state.contact_info = None
     st.session_state.llm_provider = "Groq"
     st.session_state.model_params = {
-    "model": None,
-    "temperature": None,
-    "max_tokens": None,
-    "max_retries": None,
-}
-st.session_state.vector_store_db = None
-st.session_state.vector_store_retriever = None
-st.session_state.session_id = "default_session"
-st.session_state.store = {}
+        "model": None,
+        "provider": None,
+        "temperature": None,
+        "max_tokens": None,
+        "max_retries": None,
+    }
+    st.session_state.hr_records = None
+    st.session_state.email_previews = None
+    st.session_state.filtered_hr_records = None
+    st.session_state.last_query_filter = None
+    st.session_state.vector_store_db = None
+    st.session_state.vector_store_retriever = None
+    st.session_state.rag_chain_instance = None
+    st.session_state.chat_messages = []
+    st.session_state.session_id = "default_session"
 
 
 # ══════════════════════  SIDEBAR  ══════════════════════════════════════
 with st.sidebar:
-    st.markdown("## ⚙️ Configuration")
+    st.markdown("## Configuration")
     st.markdown("---")
 
-    # ── LLM Provider selector ─────────────────────────────────────────
+    # ── LLM Provider ──────────────────────────────────────────────────
     LLM_PROVIDERS = ["OpenAI", "Ollama", "Groq", "Ollama-cloud"]
     selected_provider = st.selectbox(
-        "🧠 LLM Provider",
+        "LLM Provider",
         options=LLM_PROVIDERS,
         index=LLM_PROVIDERS.index(st.session_state.llm_provider),
         help="Choose the LLM backend that will power the cold-email agent.",
@@ -173,8 +176,8 @@ with st.sidebar:
     if selected_provider == "OpenAI":
         api_key=st.text_input("Enter your OpenAI API key:",type="password")
 
-    # ── Model parameters section ────────────────────────────────────────────────
-    st.markdown("### ⚙️ Set Model Parameters")
+    # ── Model parameters ──────────────────────────────────────────────
+    st.markdown("### Model Parameters")
     
     model_options={
             "openai": ["gpt-4o","gpt-4.1"],
@@ -183,26 +186,27 @@ with st.sidebar:
             "ollama-cloud":["gemma4:31b-cloud", "deepseek-v3.2:cloud", "gpt-oss:120b-cloud"]
         }
     
-    if st.session_state.llm_provider=="OpenAI":
-        st.session_state.model_params["model"]=st.selectbox("Select OpenAI Model",options=model_options["openai"],index=0)
-    elif st.session_state.llm_provider=="Groq":
-        st.session_state.model_params["model"]=st.selectbox("Select Groq Model",options=model_options["groq"],index=0)
-    elif st.session_state.llm_provider=="Ollama":
-        st.session_state.model_params["model"]=st.selectbox("Select Ollama Model",options=model_options["ollama"],index=0)
-    elif st.session_state.llm_provider=="Ollama-cloud":
-        st.session_state.model_params["model"]=st.selectbox("Select Ollama-Cloud Model",options=model_options["ollama-cloud"],index=0)
+    provider_key = st.session_state.llm_provider.lower()
+    if provider_key in model_options:
+        st.session_state.model_params["model"] = st.selectbox(
+            f"Select {st.session_state.llm_provider} Model",
+            options=model_options[provider_key],
+            index=0,
+        )
     
-    st.session_state.model_params["temperature"]=st.slider("Set Temperature",min_value=0.0,max_value=1.0,value=0.3,step=0.1)
+    st.session_state.model_params["temperature"]=st.slider("Temperature",min_value=0.0,max_value=1.0,value=0.3,step=0.1)
     
-    st.session_state.model_params["max_tokens"]=st.number_input("Set Max Tokens",min_value=128,max_value=4096,value=1024,step=128)
+    st.session_state.model_params["max_tokens"]=st.number_input("Max Tokens",min_value=128,max_value=4096,value=1024,step=128)
     
-    st.session_state.model_params["max_retries"]=st.number_input("Set Max Retries",min_value=0,max_value=5,value=2,step=1)
+    st.session_state.model_params["max_retries"]=st.number_input("Max Retries",min_value=0,max_value=5,value=2,step=1)
 
-    # ── Resume section ────────────────────────────────────────────────
-    st.markdown("### 📄 Upload Resume")
+    # Always sync the provider into model_params
+    st.session_state.model_params["provider"] = st.session_state.llm_provider
+
+    # ── Resume upload ───────────────────────────────────────────────
+    st.markdown("### Upload Resume")
 
     if st.session_state.resume_data is None:
-        # No resume loaded — show uploader
         uploaded_file = st.file_uploader(
             "Drop your PDF resume here",
             type=["pdf"],
@@ -215,7 +219,7 @@ with st.sidebar:
                 tmp.write(uploaded_file.getvalue())
                 tmp_path = tmp.name
 
-            with st.spinner("📖 Parsing resume …"):
+            with st.spinner("Parsing resume..."):
                 reader = ResumeReader()
                 resume_data = reader.read_resume(tmp_path)
 
@@ -228,20 +232,24 @@ with st.sidebar:
                     st.session_state.contact_info = contact if contact else None
                 except Exception as e:
                     st.session_state.contact_info = None
-                    st.warning(f"⚠️ Could not extract contact info: {e}")
-                st.success("✅ Resume uploaded & parsed!")
+                    st.warning(f"Could not extract contact info: {e}")
+                st.success("Resume uploaded and parsed.")
                 st.rerun()
             else:
-                st.error("❌ Failed to parse resume. Please try a different file.")
+                st.error("Failed to parse resume. Please try a different file.")
     else:
-        # Resume already loaded — show status + discard
         st.markdown(
-            '<div class="success-banner">📄 Resume loaded in session ✔</div>',
+            '<div class="success-banner">Resume loaded in session</div>',
             unsafe_allow_html=True,
         )
-        if st.button("🗑️ Discard Resume", type="secondary", use_container_width=True):
+        if st.button("Discard Resume", type="secondary", use_container_width=True):
             st.session_state.resume_data = None
             st.session_state.contact_info = None
+            st.session_state.email_previews = None
+            st.session_state.vector_store_db = None
+            st.session_state.vector_store_retriever = None
+            st.session_state.rag_chain_instance = None
+            st.session_state.chat_messages = []
             st.rerun()
 
 
@@ -254,85 +262,203 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# ── Load HR data from Excel/CSV ──────────────────────────────────────
+CSV_PATH = os.path.join(PROJECT_ROOT, "Data", "email.csv")
 
-# ── Create Vector Store DB Embeddings ────────────────────────────────────────────────────
+if st.session_state.hr_records is None and os.path.exists(CSV_PATH):
+    excel_reader = ExcelCsvReader(CSV_PATH)
+    excel_reader.read_csv()
+    st.session_state.hr_records = excel_reader.get_all_records()
 
+# ── Create Vector Store DB Embeddings ────────────────────────────────
 if st.session_state.vector_store_db is None and st.session_state.resume_data is not None:
-     with st.spinner("💾 Creating Embeddings in Vector DB …"):
-        vectore_instance = VectorStore(st.session_state.resume_data)
+    with st.spinner("Creating embeddings in Pinecone Vector DB..."):
+        try:
+            vector_instance = VectorStore(st.session_state.resume_data)
+            vector_store_db = vector_instance.create_vector_store()
+            if vector_store_db is not None:
+                st.session_state.vector_store_db = vector_store_db
+                st.session_state.vector_store_retriever = vector_store_db.as_retriever()
+                st.success("Vector store created successfully.")
+            else:
+                st.error("Failed to create vector store. Check Pinecone API key.")
+        except Exception as e:
+            st.error(f"Vector store creation failed: {e}")
 
-         #create vector store db
-        vector_store_db = vectore_instance.create_vector_store()
-        st.session_state.vectorstore_db = vector_store_db
-            
-        #create vector store retriever
-        vector_store_retriever = vector_store_db.as_retriever()
-        st.session_state.vector_store_retriever = vector_store_retriever
-            
-        st.success("✅ Vector Store Created Successfully!")
-
-
-# ── Build RAG Chain with message history and memory ────────────────────────────────────────────────────
-
-def get_session_history(session:str)->BaseChatMessageHistory:
-    if st.session_state.session_id not in st.session_state.store:
-        st.session_state.store[st.session_state.session_id]=ChatMessageHistory()
-    return st.session_state.store[st.session_state.session_id]    
+# ── Build RAG Chain instance (once retriever is ready) ───────────────
+if (
+    st.session_state.vector_store_retriever is not None
+    and st.session_state.model_params.get("model") is not None
+    and st.session_state.rag_chain_instance is None
+):
+    st.session_state.rag_chain_instance = RagChain(
+        model_params=st.session_state.model_params,
+        vector_store_retriever=st.session_state.vector_store_retriever,
+    )
 
 
 col1, col2 = st.columns([2, 1])
 
-# ── Resume Preview ────────────────────────────────────────────────────
+# ── Left Column: Resume Preview, HR Table, Chat, Email Generation ────
 with col1:
-    st.markdown("#### 📋 Resume Preview")
+    st.markdown("#### Resume Preview")
     if st.session_state.resume_data:
         for i, doc in enumerate(st.session_state.resume_data):
             with st.expander(f"Page {i + 1}", expanded=False):
                 st.markdown(doc.page_content)
     else:
-        st.info("⬅️ Upload your resume from the sidebar to get started.")
-    
-    if st.session_state.vector_store_db is not None and st.session_state.vector_store_retriever is not None:
-        rag_chain_instance = RagChain(
-            model_params=st.session_state.model_params,
-            vector_store_retriever=st.session_state.vector_store_retriever
+        st.info("Upload your resume from the sidebar to get started.")
+
+    # ── HR Contacts Table ─────────────────────────────────────────
+    st.markdown("#### HR / TA Contacts")
+    if st.session_state.hr_records:
+        import pandas as pd
+        display_df = pd.DataFrame(st.session_state.hr_records)[
+            ["HR Name/Team", "Email", "Company", "Company_Type", "Hiring Role"]
+        ]
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No HR contact data found. Place `email.csv` in the `Data/` folder.")
+
+    # ── Conversational RAG Chat ───────────────────────────────────────
+    st.markdown("#### 💬 Chat with your Resume (RAG)")
+
+    rag_ready = st.session_state.rag_chain_instance is not None
+
+    # Display chat history
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    chat_input = st.chat_input(
+        "Ask anything about your resume or request email drafts…",
+        disabled=not rag_ready,
+    )
+
+    if not rag_ready:
+        st.caption("⚠️ Upload a resume and wait for embeddings to enable the chat.")
+
+    if chat_input and rag_ready:
+        # Show user message
+        st.session_state.chat_messages.append({"role": "user", "content": chat_input})
+        with st.chat_message("user"):
+            st.markdown(chat_input)
+
+        # Get RAG response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking …"):
+                try:
+                    answer = st.session_state.rag_chain_instance.invoke(
+                        user_input=chat_input,
+                        session_id=st.session_state.session_id,
+                    )
+                    st.markdown(answer)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    error_msg = f"❌ Error: {e}"
+                    st.error(error_msg)
+                    st.session_state.chat_messages.append({"role": "assistant", "content": error_msg})
+
+    # ── Structured Email Generation ───────────────────────────────────
+    st.markdown("#### Generate Cold Emails (Structured Preview)")
+
+    can_generate = (
+        st.session_state.vector_store_retriever is not None
+        and st.session_state.hr_records is not None
+        and st.session_state.model_params.get("model") is not None
+    )
+
+    user_query = st.text_area(
+        "Describe the kind of email you want to generate:",
+        placeholder="e.g., Write a professional cold email expressing interest in the open role and requesting a brief introductory call.",
+        height=100,
+        disabled=not can_generate,
+    )
+
+    if st.button("Generate Email Previews", disabled=not can_generate, use_container_width=True):
+        if user_query.strip():
+            email_gen = EmailGenerator(
+                model_params=st.session_state.model_params,
+                vector_store_retriever=st.session_state.vector_store_retriever,
             )
 
-        rag_chain = rag_chain_instance.get_rag_chain()
-
-        conversational_rag_chain = RunnableWithMessageHistory(
-                rag_chain,get_session_history,
-                input_messages_key="input",
-                history_messages_key="chat_history",
-            output_messages_key="answer"
+            # StreamlitCallbackHandler shows LLM chain-of-thought in real time
+            thought_container = st.container()
+            st_callback = StreamlitCallbackHandler(
+                thought_container, expand_new_thoughts=True
             )
-    
-    user_input = st.text_input("Your question:")
-    if user_input:
-        session_history = get_session_history(st.session_state.session_id)
-        response = conversational_rag_chain.invoke(
-            {"input": user_input},
-            config={
-                "configurable": {"session_id":st.session_state.session_id}
-            },
-        )
-        st.write(st.session_state.store)
-        st.write("Assistant:", response['answer'])
 
-# ── Contact Info ──────────────────────────────────────────────────────
+            try:
+                email_batch, filtered_records, filters = email_gen.generate_email_previews(
+                    user_query=user_query.strip(),
+                    hr_records=st.session_state.hr_records,
+                    callbacks=[st_callback],
+                )
+                st.session_state.email_previews = email_batch
+                st.session_state.filtered_hr_records = filtered_records
+                st.session_state.last_query_filter = filters
+                st.success(f"Generated {len(email_batch.emails)} email(s) for {len(filtered_records)} matching contact(s).")
+            except Exception as e:
+                st.error(f"Email generation failed: {e}")
+        else:
+            st.warning("Please enter a query describing the email you want.")
+
+    if not can_generate:
+        missing = []
+        if st.session_state.vector_store_retriever is None:
+            missing.append("resume + vector store")
+        if st.session_state.hr_records is None:
+            missing.append("HR contacts (email.csv)")
+        if st.session_state.model_params.get("model") is None:
+            missing.append("model selection")
+        st.caption(f"Upload/configure: {', '.join(missing)} to enable generation.")
+
+    # ── Email Previews ────────────────────────────────────────────────
+    if st.session_state.email_previews is not None:
+        st.markdown("#### Email Previews")
+
+        if st.session_state.last_query_filter is not None:
+            f = st.session_state.last_query_filter
+            filter_parts = []
+            if f.company_type:
+                filter_parts.append(f"**Company Type:** {f.company_type}")
+            if f.hiring_role:
+                filter_parts.append(f"**Role:** {f.hiring_role}")
+            if f.company:
+                filter_parts.append(f"**Company:** {f.company}")
+            if filter_parts:
+                st.info(f"Filters applied: {' | '.join(filter_parts)} — {len(st.session_state.filtered_hr_records)} contact(s) matched")
+            else:
+                st.info("No specific filters detected — emails generated for all contacts.")
+
+        email_batch: EmailBatch = st.session_state.email_previews
+        matched_records = st.session_state.filtered_hr_records or st.session_state.hr_records
+        for idx, email in enumerate(email_batch.emails):
+            hr = matched_records[idx] if idx < len(matched_records) else {}
+            label = f"{hr.get('HR Name/Team', 'Contact')} @ {hr.get('Company', 'Unknown')} — {hr.get('Hiring Role', '')}"
+            with st.expander(label, expanded=False):
+                st.markdown(f"**Subject:** {email.subject}")
+                st.markdown("---")
+                st.markdown(email.greeting)
+                st.markdown(email.body)
+                st.markdown(email.closing)
+                st.markdown(f"*{email.signature}*")
+
+
+# ── Right Column: Contact Info ────────────────────────────────────────
 with col2:
-    st.markdown("#### 🔗 Extracted Contact Info")
+    st.markdown("#### Extracted Contact Info")
     if st.session_state.contact_info:
         info = st.session_state.contact_info
         contact_rows = {
-            "📧 Email": info.get("email"),
-            "📞 Phone": info.get("phone"),
-            "💼 LinkedIn": info.get("linkedin"),
-            "🐙 GitHub": info.get("github"),
-            "🌐 Portfolio": info.get("portfolio"),
-            "🎓 Scholar": info.get("scholar"),
+            "Email": info.get("email"),
+            "Phone": info.get("phone"),
+            "LinkedIn": info.get("linkedin"),
+            "GitHub": info.get("github"),
+            "Portfolio": info.get("portfolio"),
+            "Scholar": info.get("scholar"),
         }
-        with st.expander("📋 View Contact Details", expanded=False):
+        with st.expander("View Contact Details", expanded=False):
             for label, value in contact_rows.items():
                 if value:
                     st.markdown(f"**{label}:** {value}")
