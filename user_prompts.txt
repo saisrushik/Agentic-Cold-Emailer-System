@@ -1,52 +1,125 @@
-Based on company type: (should send emails to all hr/TA teams who are hiring from the particular company type)
-1. draft me a cold email for a software engineer position in a startup 
-2. draft me a cold email for a software engineer position in a product based company
-3. draft me a cold email for a software engineer position in a service based company
-4. draft me a cold email for a software engineer position in a FinTech company
-5. draft me a cold email for a software engineer position in a GCCs
+────────────────────────────────────────────────────────────────────────
+USER PROMPT COMBINATIONS — Agentic Cold Emailer System
+────────────────────────────────────────────────────────────────────────
 
-Based on role type: (should send emails to all hr/TA teams who are hiring for the particular role type)
-6. draft me a cold email for AI Engineer position
-7. draft me a cold email for ML Engineer position
-8. draft me a cold email for Data Scientist position
-9. draft me a cold email for software Engineer position
-10. draft me a cold email for python developer position
+NOTE:
+- The system generates ONE email per query and sends it to ALL matched HR/TA contacts.
+- The chat interface handles both email requests and general resume Q&A.
+- Filters are extracted from the prompt using LLM-based intent parsing.
+- Progressive fallback: if exact filters yield no matches, the system
+  relaxes filters (drop role first, then company type) before falling
+  back to all contacts.
 
+════════════════════════════════════════════════════════════════════════
+A) BASED ON COMPANY TYPE
+   → sends one email to ALL HR/TA teams at that company type
+════════════════════════════════════════════════════════════════════════
+1.  draft me a cold email for a software engineer position in a startup
+2.  draft me a cold email for a software engineer position in a product based company
+3.  draft me a cold email for a software engineer position in a service based company
+4.  draft me a cold email for a software engineer position in a FinTech company
+5.  draft me a cold email for a software engineer position in a GCCs
 
-Based on company: (should send emails to all hr/TA teams of the particular company)
-26. draft me a cold email for a software engineer position in a ABC company
-27. draft me a cold email for a software engineer position in a XYZ company
+════════════════════════════════════════════════════════════════════════
+B) BASED ON ROLE TYPE
+   → sends one email to ALL HR/TA teams hiring for that role
+════════════════════════════════════════════════════════════════════════
+6.  draft me a cold email for AI Engineer position
+7.  draft me a cold email for ML Engineer position
+8.  draft me a cold email for Data Scientist position
+9.  draft me a cold email for Software Engineer position
+10. draft me a cold email for Python Developer position
 
+════════════════════════════════════════════════════════════════════════
+C) BASED ON COMPANY NAME
+   → sends one email to ALL HR/TA teams at that specific company
+════════════════════════════════════════════════════════════════════════
+11. draft me a cold email for a software engineer position in ABC company
+12. draft me a cold email for XYZ company
 
-Based on both company and role:(should send emails to all hr/TA teams who are hiring for the particular role type and particular company)
-30. draft me a cold email for a software engineer position in a ABC company
-31. draft me a cold email for a AI engineer position in a XYZ company
-32. draft me a cold email for a ML engineer position in a JHBJ company
-33. draft me a cold email for a Data Scientist position in a SKDJVB company
-34. draft me a cold email for a Python developer position in a SKDJVB company
+════════════════════════════════════════════════════════════════════════
+D) BASED ON COMPANY + ROLE
+   → sends one email to HR/TA teams at that company hiring for that role
+   → fallback: if no match for role at that company, sends to all HR/TA
+     teams at that company (any role)
+════════════════════════════════════════════════════════════════════════
+13. draft me a cold email for a software engineer position in ABC company
+14. draft me a cold email for a AI engineer position in XYZ company
+15. draft me a cold email for a ML engineer position in JHBS company
+16. draft me a cold email for a Data Scientist position in SKJVB company
 
-Based  on both company type and role type: (should send emails to all hr/TA teams who are hiring for the particular role type and particular company type)
-35. draft me a cold email for a software engineer position in a startup company
-36. draft me a cold email for a AI engineer position in a product based company
-37. draft me a cold email for a ML engineer position in a service based company
-38. draft me a cold email for a Data Scientist position in a FinTech company
-39. draft me a cold email for a Python developer position in a GCCs
+════════════════════════════════════════════════════════════════════════
+E) BASED ON COMPANY TYPE + ROLE
+   → sends one email to HR/TA teams at that company type hiring for that role
+   → fallback: if no match, sends to all HR/TA teams of that company type
+════════════════════════════════════════════════════════════════════════
+17. draft me a cold email for a software engineer position in a startup company
+18. draft me a cold email for a AI engineer position in a product based company
+19. draft me a cold email for a ML engineer position in a service based company
+20. draft me a cold email for a Data Scientist position in a FinTech company
+21. draft me a cold email for a Python developer position in GCCs
 
+════════════════════════════════════════════════════════════════════════
+F) BASED ON COMPANY + COMPANY TYPE
+   → sends one email to HR/TA teams at that company matching that type
+════════════════════════════════════════════════════════════════════════
+22. draft me a cold email for ABC startup company
+23. draft me a cold email for XYZ product based company
 
-Based on both company and company type:  (should send emails to all hr/TA teams of the particular company and particular company type for a particular single role)
-40. draft me a cold email for a software engineer position in a ABC startup company
-41. draft me a cold email for a AI engineer position in a XYZ product based company
-42. draft me a cold email for a ML engineer position in a JHBJ service based company
-43. draft me a cold email for a Data Scientist position in a SKDJVB FinTech company
-44. draft me a cold email for a Python developer position in a SKDJVB GCCs company
+════════════════════════════════════════════════════════════════════════
+G) BASED ON COMPANY + COMPANY TYPE + ROLE
+   → sends one email to HR/TA teams at that company, type, and role
+   → fallback: relax role, then type, then send to company contacts
+════════════════════════════════════════════════════════════════════════
+24. draft me a cold email for a software engineer position in ABC startup company
+25. draft me a cold email for a AI engineer position in XYZ product based company
 
-for example:
-if there is no AI engineer position in a ABC company, 
-then the system should send emails to all hr/TA teams of the ABC company for other roles types except AI engineer position
+════════════════════════════════════════════════════════════════════════
+H) MULTIPLE COMPANY TYPES (edge case from screenshot)
+   → sends one email to HR/TA teams across MULTIPLE company types
+════════════════════════════════════════════════════════════════════════
+26. generate me a cold email for AI Engineer role and for product based and startup companies
+27. draft me a cold email for fintech and healthtech companies
+28. cold email for startups and GCCs for ML Engineer roles
+29. write an email targeting product based and unicorn companies for data scientist
 
-Note:
-only single email should be sent to the hr/TA teams at once for a user query.
+════════════════════════════════════════════════════════════════════════
+I) NO FILTERS (send to all contacts)
+   → sends one email to ALL HR/TA contacts
+════════════════════════════════════════════════════════════════════════
+30. generate cold email for all companies
+31. write me a cold email
+32. draft a professional cold email
+33. send a cold email to all HR teams
 
+════════════════════════════════════════════════════════════════════════
+J) GENERAL RESUME Q&A (not email — handled by RAG chain)
+   → answered by the conversational RAG system, no email generated
+════════════════════════════════════════════════════════════════════════
+34. what are my skills?
+35. summarize my experience
+36. what projects have I worked on?
+37. what is my educational background?
+38. list my certifications
 
+════════════════════════════════════════════════════════════════════════
+K) EDGE CASES
+════════════════════════════════════════════════════════════════════════
+39. draft me a cold email for AI Engineer position in ABC company
+    → if ABC has no AI Engineer opening → fallback: send to all ABC contacts
 
+40. generate email for a role that doesn't exist in the CSV
+    → fallback: relaxes role filter, matches on other filters or all contacts
 
+41. typos / variations (handled by LLM fuzzy parsing):
+    - "startup compaies" → Startup
+    - "product base" → Product Based
+    - "service based" → IT Services & Consultancy
+    - "python dev" → Python Developer
+
+42. ambiguous intent:
+    - "tell me about cold emails" → is_email_request=False (general question)
+    - "can you draft something for startups?" → is_email_request=True
+
+43. follow-up in chat:
+    - "now do the same for fintech companies" → new email request with context

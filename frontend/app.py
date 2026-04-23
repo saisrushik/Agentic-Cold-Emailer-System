@@ -10,7 +10,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from rag_pipeline.rag_chain import RagChain, EmailGenerator, ColdEmail, EmailBatch, QueryFilter
+from rag_pipeline.rag_chain import RagChain, EmailGenerator, ColdEmail, QueryFilter
 from rag_pipeline.vector_store import VectorStore
 from data_injection.resume_reader import ResumeReader
 from data_injection.excel_csv import ExcelCsvReader
@@ -142,9 +142,6 @@ if "_initialised" not in st.session_state:
         "max_retries": None,
     }
     st.session_state.hr_records = None
-    st.session_state.email_previews = None
-    st.session_state.filtered_hr_records = None
-    st.session_state.last_query_filter = None
     st.session_state.vector_store_db = None
     st.session_state.vector_store_retriever = None
     st.session_state.rag_chain_instance = None
@@ -245,7 +242,6 @@ with st.sidebar:
         if st.button("Discard Resume", type="secondary", use_container_width=True):
             st.session_state.resume_data = None
             st.session_state.contact_info = None
-            st.session_state.email_previews = None
             st.session_state.vector_store_db = None
             st.session_state.vector_store_retriever = None
             st.session_state.rag_chain_instance = None
@@ -299,7 +295,7 @@ if (
 
 col1, col2 = st.columns([2, 1])
 
-# ── Left Column: Resume Preview, HR Table, Chat, Email Generation ────
+# ── Left Column: Resume Preview + Unified Chat ───────────────────────
 with col1:
     st.markdown("#### Resume Preview")
     if st.session_state.resume_data:
@@ -309,34 +305,71 @@ with col1:
     else:
         st.info("Upload your resume from the sidebar to get started.")
 
-    # ── HR Contacts Table ─────────────────────────────────────────
-    st.markdown("#### HR / TA Contacts")
-    if st.session_state.hr_records:
-        import pandas as pd
-        display_df = pd.DataFrame(st.session_state.hr_records)[
-            ["HR Name/Team", "Email", "Company", "Company_Type", "Hiring Role"]
-        ]
-        st.dataframe(display_df, use_container_width=True, hide_index=True)
-    else:
-        st.info("No HR contact data found. Place `email.csv` in the `Data/` folder.")
+    # ── Unified Chat (RAG + Email Generation) ─────────────────────────
 
-    # ── Conversational RAG Chat ───────────────────────────────────────
-    st.markdown("#### 💬 Chat with your Resume (RAG)")
+    def _render_email_preview(email_data, contacts, filter_data):
+        """Render a single email preview with matched recipients."""
+        if isinstance(filter_data, dict):
+            filters = QueryFilter(**filter_data)
+        else:
+            filters = filter_data
+        if isinstance(email_data, dict):
+            email = ColdEmail(**email_data)
+        else:
+            email = email_data
 
-    rag_ready = st.session_state.rag_chain_instance is not None
+        # Show applied filters
+        filter_parts = []
+        if filters.company_types:
+            filter_parts.append(f"**Company Type:** {', '.join(filters.company_types)}")
+        if filters.hiring_role:
+            filter_parts.append(f"**Role:** {filters.hiring_role}")
+        if filters.company:
+            filter_parts.append(f"**Company:** {filters.company}")
+        if filter_parts:
+            st.info(f"Filters: {' | '.join(filter_parts)} — {len(contacts)} recipient(s) matched")
+        else:
+            st.info(f"No specific filters — email generated for all {len(contacts)} contact(s)")
+
+        # Email content
+        st.markdown(f"**Subject:** {email.subject}")
+        st.markdown("---")
+        st.markdown(email.greeting)
+        st.markdown(email.body)
+        st.markdown(email.closing)
+        st.markdown(f"*{email.signature}*")
+
+        # Matched recipients list
+        with st.expander(f"Recipients ({len(contacts)} contacts)", expanded=False):
+            for c in contacts:
+                st.markdown(
+                    f"- **{c.get('HR Name/Team', 'N/A')}** — "
+                    f"{c.get('Company', 'N/A')} ({c.get('Company_Type', 'N/A')}) — "
+                    f"{c.get('Hiring Role', 'N/A')}"
+                )
+
+    st.markdown("#### Chat")
+
+    rag_ready = (
+        st.session_state.rag_chain_instance is not None
+        and st.session_state.model_params.get("model") is not None
+    )
 
     # Display chat history
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+            if msg.get("type") == "email":
+                _render_email_preview(msg["email"], msg["contacts"], msg["filters"])
+            else:
+                st.markdown(msg.get("content", ""))
 
     chat_input = st.chat_input(
-        "Ask anything about your resume or request email drafts…",
+        "Ask about your resume or request cold emails...",
         disabled=not rag_ready,
     )
 
     if not rag_ready:
-        st.caption("⚠️ Upload a resume and wait for embeddings to enable the chat.")
+        st.caption("Upload a resume and wait for embeddings to enable the chat.")
 
     if chat_input and rag_ready:
         # Show user message
@@ -344,105 +377,66 @@ with col1:
         with st.chat_message("user"):
             st.markdown(chat_input)
 
-        # Get RAG response
         with st.chat_message("assistant"):
-            with st.spinner("Thinking …"):
-                try:
-                    answer = st.session_state.rag_chain_instance.invoke(
-                        user_input=chat_input,
-                        session_id=st.session_state.session_id,
-                    )
-                    st.markdown(answer)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": answer})
-                except Exception as e:
-                    error_msg = f"❌ Error: {e}"
-                    st.error(error_msg)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": error_msg})
-
-    # ── Structured Email Generation ───────────────────────────────────
-    st.markdown("#### Generate Cold Emails (Structured Preview)")
-
-    can_generate = (
-        st.session_state.vector_store_retriever is not None
-        and st.session_state.hr_records is not None
-        and st.session_state.model_params.get("model") is not None
-    )
-
-    user_query = st.text_area(
-        "Describe the kind of email you want to generate:",
-        placeholder="e.g., Write a professional cold email expressing interest in the open role and requesting a brief introductory call.",
-        height=100,
-        disabled=not can_generate,
-    )
-
-    if st.button("Generate Email Previews", disabled=not can_generate, use_container_width=True):
-        if user_query.strip():
-            email_gen = EmailGenerator(
-                model_params=st.session_state.model_params,
-                vector_store_retriever=st.session_state.vector_store_retriever,
-            )
-
-            # StreamlitCallbackHandler shows LLM chain-of-thought in real time
             thought_container = st.container()
             st_callback = StreamlitCallbackHandler(
                 thought_container, expand_new_thoughts=True
             )
 
             try:
-                email_batch, filtered_records, filters = email_gen.generate_email_previews(
-                    user_query=user_query.strip(),
-                    hr_records=st.session_state.hr_records,
-                    callbacks=[st_callback],
+                email_gen = EmailGenerator(
+                    model_params=st.session_state.model_params,
+                    vector_store_retriever=st.session_state.vector_store_retriever,
                 )
-                st.session_state.email_previews = email_batch
-                st.session_state.filtered_hr_records = filtered_records
-                st.session_state.last_query_filter = filters
-                st.success(f"Generated {len(email_batch.emails)} email(s) for {len(filtered_records)} matching contact(s).")
+
+                # Classify intent and extract filters
+                query_filter = email_gen.parse_query(chat_input, callbacks=[st_callback])
+
+                if query_filter.is_email_request:
+                    if st.session_state.hr_records:
+                        email, contacts, filters = email_gen.generate_email_preview(
+                            user_query=chat_input,
+                            hr_records=st.session_state.hr_records,
+                            filters=query_filter,
+                            callbacks=[st_callback],
+                        )
+                        _render_email_preview(email, contacts, filters)
+                        st.session_state.chat_messages.append({
+                            "role": "assistant",
+                            "type": "email",
+                            "email": email.model_dump(),
+                            "contacts": contacts,
+                            "filters": filters.model_dump(),
+                        })
+                    else:
+                        msg = "HR contact data not found. Place email.csv in the Data/ folder."
+                        st.warning(msg)
+                        st.session_state.chat_messages.append({
+                            "role": "assistant",
+                            "type": "text",
+                            "content": msg,
+                        })
+                else:
+                    # General RAG question
+                    answer = st.session_state.rag_chain_instance.invoke(
+                        user_input=chat_input,
+                        session_id=st.session_state.session_id,
+                        callbacks=[st_callback],
+                    )
+                    st.markdown(answer)
+                    st.session_state.chat_messages.append({
+                        "role": "assistant",
+                        "type": "text",
+                        "content": answer,
+                    })
             except Exception as e:
-                st.error(f"Email generation failed: {e}")
-        else:
-            st.warning("Please enter a query describing the email you want.")
-
-    if not can_generate:
-        missing = []
-        if st.session_state.vector_store_retriever is None:
-            missing.append("resume + vector store")
-        if st.session_state.hr_records is None:
-            missing.append("HR contacts (email.csv)")
-        if st.session_state.model_params.get("model") is None:
-            missing.append("model selection")
-        st.caption(f"Upload/configure: {', '.join(missing)} to enable generation.")
-
-    # ── Email Previews ────────────────────────────────────────────────
-    if st.session_state.email_previews is not None:
-        st.markdown("#### Email Previews")
-
-        if st.session_state.last_query_filter is not None:
-            f = st.session_state.last_query_filter
-            filter_parts = []
-            if f.company_type:
-                filter_parts.append(f"**Company Type:** {f.company_type}")
-            if f.hiring_role:
-                filter_parts.append(f"**Role:** {f.hiring_role}")
-            if f.company:
-                filter_parts.append(f"**Company:** {f.company}")
-            if filter_parts:
-                st.info(f"Filters applied: {' | '.join(filter_parts)} — {len(st.session_state.filtered_hr_records)} contact(s) matched")
-            else:
-                st.info("No specific filters detected — emails generated for all contacts.")
-
-        email_batch: EmailBatch = st.session_state.email_previews
-        matched_records = st.session_state.filtered_hr_records or st.session_state.hr_records
-        for idx, email in enumerate(email_batch.emails):
-            hr = matched_records[idx] if idx < len(matched_records) else {}
-            label = f"{hr.get('HR Name/Team', 'Contact')} @ {hr.get('Company', 'Unknown')} — {hr.get('Hiring Role', '')}"
-            with st.expander(label, expanded=False):
-                st.markdown(f"**Subject:** {email.subject}")
-                st.markdown("---")
-                st.markdown(email.greeting)
-                st.markdown(email.body)
-                st.markdown(email.closing)
-                st.markdown(f"*{email.signature}*")
+                error_msg = f"Error: {e}"
+                st.error(error_msg)
+                st.session_state.chat_messages.append({
+                    "role": "assistant",
+                    "type": "text",
+                    "content": error_msg,
+                })
 
 
 # ── Right Column: Contact Info ────────────────────────────────────────

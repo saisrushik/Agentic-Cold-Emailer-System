@@ -27,28 +27,37 @@ os.environ["LANGSMITH_TRACING"] = "true"
 
 class ColdEmail(BaseModel):
     subject: str = Field(description="Email subject line — concise and attention-grabbing")
-    greeting: str = Field(description="Personalized greeting addressing the HR/TA person by name")
-    body: str = Field(description="Main email body — professional, non-spammy, and tailored to the company and role")
+    greeting: str = Field(description="Professional greeting (e.g., 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,')")
+    body: str = Field(description="Main email body — professional, non-spammy, tailored to the company type, role, and candidate resume")
     closing: str = Field(description="Professional closing statement with a call to action")
     signature: str = Field(description="Email signature with candidate name")
 
 
-class EmailBatch(BaseModel):
-    emails: list[ColdEmail] = Field(description="List of generated cold emails, one per HR contact")
-
-
 class QueryFilter(BaseModel):
-    company_type: Optional[str] = Field(
+    is_email_request: bool = Field(
+        default=False,
+        description=(
+            "True if the user wants to generate, draft, write, compose, or send a cold email. "
+            "False if the user is asking a general question about their resume or anything else."
+        ),
+    )
+    company_types: Optional[list[str]] = Field(
         default=None,
-        description="Company type filter extracted from the user query (e.g., Startup, Product Based, FinTech, GCCs, etc.). None if not specified.",
+        description=(
+            "List of company type filters extracted from the query. "
+            "Examples: ['Startup'], ['Product Based', 'Startup'], ['FinTech'], ['GCCs']. "
+            "Recognized types: Startup, Product Based, IT Services, IT Services & Consultancy, "
+            "FinTech, GCCs, Unicorn, HealthTech. "
+            "If MULTIPLE types are mentioned return ALL as a list. None if not specified."
+        ),
     )
     hiring_role: Optional[str] = Field(
         default=None,
-        description="Hiring role filter extracted from the user query (e.g., AI Engineer, Python Developer, etc.). None if not specified.",
+        description="Hiring role filter (e.g., 'AI Engineer', 'Python Developer', 'ML Engineer'). None if not specified.",
     )
     company: Optional[str] = Field(
         default=None,
-        description="Specific company name filter extracted from the user query. None if not specified.",
+        description="Specific company name filter (e.g., 'Google', 'ABC'). Do NOT confuse company-type words like 'startup' with company names. None if not specified.",
     )
 
 
@@ -211,20 +220,43 @@ class EmailGenerator:
         self.model_params = model_params
         self.vector_store_retriever = vector_store_retriever
 
-    def _parse_query_filters(self, user_query: str, callbacks: list | None = None) -> QueryFilter:
+    def parse_query(self, user_query: str, callbacks: list | None = None) -> QueryFilter:
+        """Classify intent and extract filter criteria from user query."""
         llm = build_llm(self.model_params, callbacks=callbacks)
 
         filter_prompt = ChatPromptTemplate.from_messages([
             ("system",
-             "You are a query parser. Extract filter criteria from the user's request. "
-             "The user wants to send cold emails to specific HR contacts. "
-             "Extract any company type, hiring role, or company name they mention. "
-             "Use fuzzy/semantic matching — for example:\n"
-             "- 'startup companies' -> company_type='Startup'\n"
-             "- 'AI Engineer roles' -> hiring_role='AI Engineer'\n"
-             "- 'product based' -> company_type='Product Based'\n"
-             "- 'fintech' -> company_type='FinTech'\n"
-             "Return None for any field not mentioned in the query."),
+             "You are a query classifier and filter parser for a cold-email system.\n\n"
+             "Determine TWO things from the user's message:\n"
+             "1. **is_email_request**: Is the user asking to generate/draft/write/compose/send a cold email? "
+             "Set True if yes, False if it is a general question.\n"
+             "2. **Filters** (only relevant when is_email_request=True):\n"
+             "   - company_types: list of company types mentioned. "
+             "Recognized types: Startup, Product Based, IT Services, IT Services & Consultancy, "
+             "FinTech, GCCs, Unicorn, HealthTech. "
+             "Map synonyms: 'service based' -> 'IT Services & Consultancy', "
+             "'product companies' -> 'Product Based'. "
+             "If MULTIPLE types are mentioned (e.g. 'product based and startup'), return ALL as a list. "
+             "None if not mentioned.\n"
+             "   - hiring_role: the job role mentioned (e.g. 'AI Engineer', 'Python Developer', "
+             "'ML Engineer', 'Data Scientist', 'Software Engineer', 'Software Developer', "
+             "'Software Engineer in Test'). None if not mentioned.\n"
+             "   - company: a specific company name (e.g. 'Google', 'ABC', 'XYZ'). "
+             "Do NOT confuse company-type words like 'startup' with company names. None if not mentioned.\n\n"
+             "Examples:\n"
+             "- 'draft me a cold email for AI Engineer role in startups' -> "
+             "is_email_request=True, company_types=['Startup'], hiring_role='AI Engineer', company=None\n"
+             "- 'generate email for product based and startup companies' -> "
+             "is_email_request=True, company_types=['Product Based', 'Startup'], hiring_role=None, company=None\n"
+             "- 'cold email for AI Engineer at ABC company' -> "
+             "is_email_request=True, company_types=None, hiring_role='AI Engineer', company='ABC'\n"
+             "- 'write email for python developer in fintech' -> "
+             "is_email_request=True, company_types=['FinTech'], hiring_role='Python Developer', company=None\n"
+             "- 'draft email for ABC startup company' -> "
+             "is_email_request=True, company_types=['Startup'], hiring_role=None, company='ABC'\n"
+             "- 'what are my skills?' -> is_email_request=False, all filters None\n"
+             "- 'generate cold email for all companies' -> is_email_request=True, all filters None\n"
+             "Return None for any filter not mentioned in the query."),
             ("human", "{input}"),
         ])
 
@@ -235,11 +267,11 @@ class EmailGenerator:
     def _filter_hr_records(self, hr_records: list[dict], filters: QueryFilter) -> list[dict]:
         filtered = hr_records
 
-        if filters.company_type:
-            query_ct = filters.company_type.lower().strip()
+        if filters.company_types:
+            query_types = [ct.lower().strip() for ct in filters.company_types]
             filtered = [
                 r for r in filtered
-                if query_ct in str(r.get("Company_Type", "")).lower()
+                if any(ct in str(r.get("Company_Type", "")).lower() for ct in query_types)
             ]
 
         if filters.hiring_role:
@@ -258,65 +290,84 @@ class EmailGenerator:
 
         return filtered
 
-    def generate_email_previews(
+    def generate_email_preview(
         self,
         user_query: str,
         hr_records: list[dict],
+        filters: QueryFilter | None = None,
         callbacks: list | None = None,
-    ) -> tuple[EmailBatch, list[dict], QueryFilter]:
+    ) -> tuple[ColdEmail, list[dict], QueryFilter]:
+        """Generate a single cold email and return matched HR contacts."""
         if not hr_records:
             raise ValueError("No HR contact records provided.")
 
-        # Step 1: Parse user query to extract filter criteria
-        filters = self._parse_query_filters(user_query, callbacks=callbacks)
+        # Step 1: Use pre-parsed filters or parse now
+        if filters is None:
+            filters = self.parse_query(user_query, callbacks=callbacks)
 
-        # Step 2: Filter HR records based on extracted criteria
-        filtered_records = self._filter_hr_records(hr_records, filters)
+        # Step 2: Filter HR records with progressive fallback
+        filtered = self._filter_hr_records(hr_records, filters)
 
-        if not filtered_records:
-            raise ValueError(
-                f"No HR contacts match the filter — "
-                f"Company Type: '{filters.company_type or 'any'}', "
-                f"Hiring Role: '{filters.hiring_role or 'any'}', "
-                f"Company: '{filters.company or 'any'}'. "
-                f"Check your email.csv data."
+        # Fallback 1: drop hiring_role if no results
+        if not filtered and filters.hiring_role:
+            relaxed = QueryFilter(
+                is_email_request=True,
+                company_types=filters.company_types,
+                hiring_role=None,
+                company=filters.company,
             )
+            filtered = self._filter_hr_records(hr_records, relaxed)
+
+        # Fallback 2: drop company_types if still no results
+        if not filtered and filters.company_types:
+            relaxed = QueryFilter(
+                is_email_request=True,
+                company_types=None,
+                hiring_role=filters.hiring_role,
+                company=filters.company,
+            )
+            filtered = self._filter_hr_records(hr_records, relaxed)
+
+        # Fallback 3: use all records
+        if not filtered:
+            filtered = hr_records
 
         llm = build_llm(self.model_params, callbacks=callbacks)
 
-        # Step 3: Retrieve relevant resume chunks via the vector store
+        # Step 3: Retrieve relevant resume context
         retrieved_docs = self.vector_store_retriever.invoke(user_query)
         resume_context = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
-        hr_details_block = "\n".join(
-            f"- HR/TA Name: {r.get('HR Name/Team', 'N/A')}, "
-            f"Email: {r.get('Email', 'N/A')}, "
-            f"Company: {r.get('Company', 'N/A')}, "
-            f"Company Type: {r.get('Company_Type', 'N/A')}, "
-            f"Hiring Role: {r.get('Hiring Role', 'N/A')}"
-            for r in filtered_records
+        # Summarise target audience
+        companies = sorted(set(r.get("Company", "N/A") for r in filtered))
+        company_types = sorted(set(str(r.get("Company_Type", "")) for r in filtered if r.get("Company_Type")))
+        roles = sorted(set(r.get("Hiring Role", "N/A") for r in filtered))
+
+        target_summary = (
+            f"Number of recipients: {len(filtered)}\n"
+            f"Companies: {', '.join(companies)}\n"
+            f"Company types: {', '.join(company_types) if company_types else 'Various'}\n"
+            f"Roles being hired: {', '.join(roles)}"
         )
 
         system_prompt = (
-            "You are an expert cold-email copywriter for job seekers. "
-            "Your task is to generate professional, concise, and personalized cold emails "
-            "that a candidate can send to HR professionals or Talent Acquisition teams.\n\n"
+            "You are an expert cold-email copywriter for job seekers.\n\n"
+            "Generate exactly ONE professional cold email that the candidate will send "
+            "to multiple HR / Talent Acquisition contacts.\n\n"
             "Guidelines:\n"
-            "- Each email must be tailored to the specific HR contact, company, company type, and hiring role.\n"
-            "- The tone should be professional, confident, and non-spammy.\n"
-            "- Keep emails concise (150-250 words for the body).\n"
+            "- The email must work for ALL recipients listed below — do NOT personalise to one contact.\n"
+            "- Use a generic professional greeting like 'Dear Hiring Team,'.\n"
+            "- Tailor the tone to the company type (formal for enterprise/GCCs, slightly casual for startups).\n"
+            "- Reference the specific role or area of interest from the user's request.\n"
             "- Highlight the candidate's relevant skills and experience from their resume.\n"
-            "- Include a clear call-to-action (e.g., requesting a brief call or meeting).\n"
-            "- Do NOT use generic templates — each email should feel unique and genuine.\n"
-            "- Adapt the language based on the company type (e.g., more formal for enterprise, "
-            "slightly casual for startups).\n\n"
-            "Candidate Resume Context:\n"
-            "---\n"
-            f"{resume_context}\n"
-            "---\n\n"
-            "HR / TA Contacts to email:\n"
-            f"{hr_details_block}\n\n"
-            "Generate one cold email for EACH HR contact listed above."
+            "- Keep the body concise (150-250 words).\n"
+            "- Include a clear call-to-action (e.g., requesting a brief introductory call).\n"
+            "- Do NOT use placeholder brackets like [Company Name] — write a complete, ready-to-send email.\n"
+            "- Do NOT mention that this email is being sent to multiple people.\n\n"
+            "Candidate Resume:\n---\n"
+            f"{resume_context}\n---\n\n"
+            "Target Audience:\n"
+            f"{target_summary}"
         )
 
         prompt = ChatPromptTemplate.from_messages([
@@ -324,9 +375,9 @@ class EmailGenerator:
             ("human", "{input}"),
         ])
 
-        structured_llm = llm.with_structured_output(EmailBatch)
+        structured_llm = llm.with_structured_output(ColdEmail)
         chain = prompt | structured_llm
         result = chain.invoke({"input": user_query}, config={"callbacks": callbacks or []})
 
-        return result, filtered_records, filters
+        return result, filtered, filters
 
