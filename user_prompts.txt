@@ -1,0 +1,52 @@
+Based on company type: (should send emails to all hr/TA teams who are hiring from the particular company type)
+1. draft me a cold email for a software engineer position in a startup 
+2. draft me a cold email for a software engineer position in a product based company
+3. draft me a cold email for a software engineer position in a service based company
+4. draft me a cold email for a software engineer position in a FinTech company
+5. draft me a cold email for a software engineer position in a GCCs
+
+Based on role type: (should send emails to all hr/TA teams who are hiring for the particular role type)
+6. draft me a cold email for AI Engineer position
+7. draft me a cold email for ML Engineer position
+8. draft me a cold email for Data Scientist position
+9. draft me a cold email for software Engineer position
+10. draft me a cold email for python developer position
+
+
+Based on company: (should send emails to all hr/TA teams of the particular company)
+26. draft me a cold email for a software engineer position in a ABC company
+27. draft me a cold email for a software engineer position in a XYZ company
+
+
+Based on both company and role:(should send emails to all hr/TA teams who are hiring for the particular role type and particular company)
+30. draft me a cold email for a software engineer position in a ABC company
+31. draft me a cold email for a AI engineer position in a XYZ company
+32. draft me a cold email for a ML engineer position in a JHBJ company
+33. draft me a cold email for a Data Scientist position in a SKDJVB company
+34. draft me a cold email for a Python developer position in a SKDJVB company
+
+Based  on both company type and role type: (should send emails to all hr/TA teams who are hiring for the particular role type and particular company type)
+35. draft me a cold email for a software engineer position in a startup company
+36. draft me a cold email for a AI engineer position in a product based company
+37. draft me a cold email for a ML engineer position in a service based company
+38. draft me a cold email for a Data Scientist position in a FinTech company
+39. draft me a cold email for a Python developer position in a GCCs
+
+
+Based on both company and company type:  (should send emails to all hr/TA teams of the particular company and particular company type for a particular single role)
+40. draft me a cold email for a software engineer position in a ABC startup company
+41. draft me a cold email for a AI engineer position in a XYZ product based company
+42. draft me a cold email for a ML engineer position in a JHBJ service based company
+43. draft me a cold email for a Data Scientist position in a SKDJVB FinTech company
+44. draft me a cold email for a Python developer position in a SKDJVB GCCs company
+
+for example:
+if there is no AI engineer position in a ABC company, 
+then the system should send emails to all hr/TA teams of the ABC company for other roles types except AI engineer position
+
+Note:
+only single email should be sent to the hr/TA teams at once for a user query.
+
+
+
+
