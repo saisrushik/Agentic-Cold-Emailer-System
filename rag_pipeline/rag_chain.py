@@ -148,6 +148,7 @@ class RagChain:
             "- Highlight the candidate's relevant skills and experience from the retrieved resume context below.\n"
             "- Include a clear call-to-action (e.g., requesting a brief call or meeting).\n"
             "- Do NOT use generic templates — each email should feel unique and genuine.\n"
+            "- Do NOT use any links in the email like linkedin, github, portfolio, or any website links.\n"
             "- Adapt the language based on the company type (e.g., more formal for enterprise, "
             "slightly casual for startups).\n\n"
             "Retrieved Resume Context:\n"
