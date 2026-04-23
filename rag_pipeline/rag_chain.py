@@ -4,7 +4,7 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
@@ -241,7 +241,7 @@ class EmailGenerator:
 
     def parse_query(self, user_query: str, callbacks: list | None = None) -> QueryFilter:
         """Classify intent and extract filter criteria from user query."""
-        llm = build_llm(self.model_params, callbacks=callbacks)
+        llm = build_llm(self.model_params, streaming=True, callbacks=callbacks)
 
         filter_prompt = ChatPromptTemplate.from_messages([
             ("system",
@@ -368,7 +368,7 @@ class EmailGenerator:
             groups.append((company, role, list(grp)))
 
         # Step 5: Generate one tailored email per group
-        llm = build_llm(self.model_params, callbacks=callbacks)
+        llm = build_llm(self.model_params, streaming=True, callbacks=callbacks)
         structured_llm = llm.with_structured_output(ColdEmail)
 
         results: list[tuple[ColdEmail, list[dict]]] = []
@@ -405,14 +405,15 @@ class EmailGenerator:
                 f"HR/TA Contact(s): {', '.join(hr_names)}"
             )
 
-            prompt = ChatPromptTemplate.from_messages([
+            # Invoke directly with messages to avoid ChatPromptTemplate
+            # interpreting any literal '{...}' inside resume/HR data as template
+            # variables (which caused missing-variable errors).
+            messages = [
                 SystemMessage(content=system_prompt),
-                ("human", "{input}"),
-            ])
-
-            chain = prompt | structured_llm
-            email = chain.invoke(
-                {"input": user_query},
+                HumanMessage(content=user_query),
+            ]
+            email = structured_llm.invoke(
+                messages,
                 config={"callbacks": callbacks or []},
             )
             results.append((email, group_records))
