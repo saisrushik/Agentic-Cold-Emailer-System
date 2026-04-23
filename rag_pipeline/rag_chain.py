@@ -11,6 +11,7 @@ from langchain_ollama import ChatOllama
 
 from pydantic import BaseModel, Field
 from typing import Optional
+from itertools import groupby
 from data_injection.excel_csv import ExcelCsvReader
 
 import os
@@ -27,10 +28,26 @@ os.environ["LANGSMITH_TRACING"] = "true"
 
 class ColdEmail(BaseModel):
     subject: str = Field(description="Email subject line — concise and attention-grabbing")
-    greeting: str = Field(description="Professional greeting (e.g., 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,')")
-    body: str = Field(description="Main email body — professional, non-spammy, tailored to the company type, role, and candidate resume")
+    greeting: str = Field(
+        description=(
+            "Greeting line. If the recipient is a named person use 'Dear {name},' "
+            "(e.g., 'Dear Priya,'). If the recipient is a team or the name looks like a "
+            "team/department, use 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,'."
+        )
+    )
+    body: str = Field(
+        description=(
+            "Main email body — professional, non-spammy, tailored to the company type, "
+            "role, and candidate resume. Must NOT contain any URLs, hyperlinks, or web addresses."
+        )
+    )
     closing: str = Field(description="Professional closing statement with a call to action")
-    signature: str = Field(description="Email signature with candidate name")
+    signature: str = Field(
+        description=(
+            "Email signature with candidate name and contact details (phone/email only). "
+            "Must NOT contain any URLs, hyperlinks, or web addresses."
+        )
+    )
 
 
 class QueryFilter(BaseModel):
@@ -291,14 +308,14 @@ class EmailGenerator:
 
         return filtered
 
-    def generate_email_preview(
+    def generate_emails(
         self,
         user_query: str,
         hr_records: list[dict],
         filters: QueryFilter | None = None,
         callbacks: list | None = None,
-    ) -> tuple[ColdEmail, list[dict], QueryFilter]:
-        """Generate a single cold email and return matched HR contacts."""
+    ) -> tuple[list[tuple[ColdEmail, list[dict]]], QueryFilter]:
+        """Generate tailored emails grouped by (Company, Hiring Role)."""
         if not hr_records:
             raise ValueError("No HR contact records provided.")
 
@@ -333,52 +350,71 @@ class EmailGenerator:
         if not filtered:
             filtered = hr_records
 
-        llm = build_llm(self.model_params, callbacks=callbacks)
-
-        # Step 3: Retrieve relevant resume context
+        # Step 3: Retrieve resume context once (shared across all emails)
         retrieved_docs = self.vector_store_retriever.invoke(user_query)
         resume_context = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
-        # Summarise target audience
-        companies = sorted(set(r.get("Company", "N/A") for r in filtered))
-        company_types = sorted(set(str(r.get("Company_Type", "")) for r in filtered if r.get("Company_Type")))
-        roles = sorted(set(r.get("Hiring Role", "N/A") for r in filtered))
-
-        target_summary = (
-            f"Number of recipients: {len(filtered)}\n"
-            f"Companies: {', '.join(companies)}\n"
-            f"Company types: {', '.join(company_types) if company_types else 'Various'}\n"
-            f"Roles being hired: {', '.join(roles)}"
+        # Step 4: Group by (Company, Hiring Role)
+        sorted_records = sorted(
+            filtered,
+            key=lambda r: (r.get("Company", ""), r.get("Hiring Role", "")),
         )
+        groups: list[tuple[str, str, list[dict]]] = []
+        for (company, role), grp in groupby(
+            sorted_records,
+            key=lambda r: (r.get("Company", ""), r.get("Hiring Role", "")),
+        ):
+            groups.append((company, role, list(grp)))
 
-        system_prompt = (
-            "You are an expert cold-email copywriter for job seekers.\n\n"
-            "Generate exactly ONE professional cold email that the candidate will send "
-            "to multiple HR / Talent Acquisition contacts.\n\n"
-            "Guidelines:\n"
-            "- The email must work for ALL recipients listed below — do NOT personalise to one contact.\n"
-            "- Use a generic professional greeting like 'Dear Hiring Team,'.\n"
-            "- Tailor the tone to the company type (formal for enterprise/GCCs, slightly casual for startups).\n"
-            "- Reference the specific role or area of interest from the user's request.\n"
-            "- Highlight the candidate's relevant skills and experience from their resume.\n"
-            "- Keep the body concise (150-250 words).\n"
-            "- Include a clear call-to-action (e.g., requesting a brief introductory call).\n"
-            "- Do NOT use placeholder brackets like [Company Name] — write a complete, ready-to-send email.\n"
-            "- Do NOT mention that this email is being sent to multiple people.\n\n"
-            "Candidate Resume:\n---\n"
-            f"{resume_context}\n---\n\n"
-            "Target Audience:\n"
-            f"{target_summary}"
-        )
-
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
-            ("human", "{input}"),
-        ])
-
+        # Step 5: Generate one tailored email per group
+        llm = build_llm(self.model_params, callbacks=callbacks)
         structured_llm = llm.with_structured_output(ColdEmail)
-        chain = prompt | structured_llm
-        result = chain.invoke({"input": user_query}, config={"callbacks": callbacks or []})
 
-        return result, filtered, filters
+        results: list[tuple[ColdEmail, list[dict]]] = []
+        for company, role, group_records in groups:
+            hr_names = [r.get("HR Name/Team", "N/A") for r in group_records]
+            company_type = group_records[0].get("Company_Type", "") or "N/A"
+
+            system_prompt = (
+                "You are an expert cold-email copywriter for job seekers.\n\n"
+                "Generate exactly ONE professional cold email for the target described below.\n\n"
+                "Guidelines:\n"
+                "- GREETING RULES (critical):\n"
+                "  * If there is exactly ONE recipient and the name is a person's name "
+                "(e.g., 'Priya', 'John', 'Rahul Sharma'), use 'Dear {name},' (e.g., 'Dear Priya,').\n"
+                "  * If the name looks like a team or department "
+                "(e.g., 'HR Team', 'Talent Acquisition', 'Recruitment Team'), "
+                "use 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,'.\n"
+                "  * If there are MULTIPLE recipients, use 'Dear Hiring Team,'.\n"
+                "- MENTION the specific company name and role in the email body naturally.\n"
+                "- NO LINKS: The email must NOT contain any URLs, hyperlinks, portfolio links, "
+                "GitHub links, LinkedIn links, or any web addresses. Emails with links will bounce.\n"
+                "- Tailor the tone to the company type "
+                "(formal for enterprise/GCCs, slightly casual for startups).\n"
+                "- Highlight the candidate's relevant skills and experience from their resume.\n"
+                "- Keep the body concise (150-250 words).\n"
+                "- Include a clear call-to-action (e.g., requesting a brief introductory call).\n"
+                "- Do NOT use placeholder brackets like [Company Name].\n"
+                "- The signature should only contain the candidate's name, phone, and email.\n\n"
+                "Candidate Resume:\n---\n"
+                f"{resume_context}\n---\n\n"
+                f"Target Company: {company}\n"
+                f"Company Type: {company_type}\n"
+                f"Hiring Role: {role}\n"
+                f"HR/TA Contact(s): {', '.join(hr_names)}"
+            )
+
+            prompt = ChatPromptTemplate.from_messages([
+                ("system", system_prompt),
+                ("human", "{input}"),
+            ])
+
+            chain = prompt | structured_llm
+            email = chain.invoke(
+                {"input": user_query},
+                config={"callbacks": callbacks or []},
+            )
+            results.append((email, group_records))
+
+        return results, filters
 

@@ -307,16 +307,12 @@ with col1:
 
     # ── Unified Chat (RAG + Email Generation) ─────────────────────────
 
-    def _render_email_preview(email_data, contacts, filter_data):
-        """Render a single email preview with matched recipients."""
+    def _render_email_results(email_groups, filter_data):
+        """Render multiple tailored email previews grouped by company+role."""
         if isinstance(filter_data, dict):
             filters = QueryFilter(**filter_data)
         else:
             filters = filter_data
-        if isinstance(email_data, dict):
-            email = ColdEmail(**email_data)
-        else:
-            email = email_data
 
         # Show applied filters
         filter_parts = []
@@ -326,27 +322,39 @@ with col1:
             filter_parts.append(f"**Role:** {filters.hiring_role}")
         if filters.company:
             filter_parts.append(f"**Company:** {filters.company}")
+
+        total_recipients = sum(len(g["contacts"]) for g in email_groups)
         if filter_parts:
-            st.info(f"Filters: {' | '.join(filter_parts)} — {len(contacts)} recipient(s) matched")
+            st.info(f"Filters: {' | '.join(filter_parts)} — {total_recipients} recipient(s), {len(email_groups)} email(s)")
         else:
-            st.info(f"No specific filters — email generated for all {len(contacts)} contact(s)")
+            st.info(f"No specific filters — {len(email_groups)} email(s) for {total_recipients} contact(s)")
 
-        # Email content
-        st.markdown(f"**Subject:** {email.subject}")
-        st.markdown("---")
-        st.markdown(email.greeting)
-        st.markdown(email.body)
-        st.markdown(email.closing)
-        st.markdown(f"*{email.signature}*")
+        for i, group in enumerate(email_groups):
+            email_data = group["email"]
+            contacts = group["contacts"]
+            if isinstance(email_data, dict):
+                email = ColdEmail(**email_data)
+            else:
+                email = email_data
 
-        # Matched recipients list
-        with st.expander(f"Recipients ({len(contacts)} contacts)", expanded=False):
-            for c in contacts:
-                st.markdown(
-                    f"- **{c.get('HR Name/Team', 'N/A')}** — "
-                    f"{c.get('Company', 'N/A')} ({c.get('Company_Type', 'N/A')}) — "
-                    f"{c.get('Hiring Role', 'N/A')}"
-                )
+            company = contacts[0].get("Company", "Unknown") if contacts else "Unknown"
+            role = contacts[0].get("Hiring Role", "Unknown") if contacts else "Unknown"
+            label = f"{company} — {role} ({len(contacts)} recipient(s))"
+
+            with st.expander(label, expanded=(len(email_groups) == 1)):
+                st.markdown(f"**Subject:** {email.subject}")
+                st.markdown("---")
+                st.markdown(email.greeting)
+                st.markdown(email.body)
+                st.markdown(email.closing)
+                st.markdown(f"*{email.signature}*")
+                st.markdown("---")
+                st.caption("**Recipients:**")
+                for c in contacts:
+                    st.caption(
+                        f"  {c.get('HR Name/Team', 'N/A')} — "
+                        f"{c.get('Email', 'N/A')}"
+                    )
 
     st.markdown("#### Chat")
 
@@ -359,7 +367,7 @@ with col1:
     for msg in st.session_state.chat_messages:
         with st.chat_message(msg["role"]):
             if msg.get("type") == "email":
-                _render_email_preview(msg["email"], msg["contacts"], msg["filters"])
+                _render_email_results(msg["email_groups"], msg["filters"])
             else:
                 st.markdown(msg.get("content", ""))
 
@@ -394,18 +402,22 @@ with col1:
 
                 if query_filter.is_email_request:
                     if st.session_state.hr_records:
-                        email, contacts, filters = email_gen.generate_email_preview(
+                        email_groups_raw, filters = email_gen.generate_emails(
                             user_query=chat_input,
                             hr_records=st.session_state.hr_records,
                             filters=query_filter,
                             callbacks=[st_callback],
                         )
-                        _render_email_preview(email, contacts, filters)
+                        # Build serialisable groups for chat history
+                        email_groups = [
+                            {"email": email.model_dump(), "contacts": contacts}
+                            for email, contacts in email_groups_raw
+                        ]
+                        _render_email_results(email_groups, filters)
                         st.session_state.chat_messages.append({
                             "role": "assistant",
                             "type": "email",
-                            "email": email.model_dump(),
-                            "contacts": contacts,
+                            "email_groups": email_groups,
                             "filters": filters.model_dump(),
                         })
                     else:
