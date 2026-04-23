@@ -9,5 +9,6 @@ wheels/
 # Virtual environments
 .venv
 .env 
-Data/
+Data/Resume - ML.docx
+Data/Resume - ML.pdf
 test_code.ipynb
