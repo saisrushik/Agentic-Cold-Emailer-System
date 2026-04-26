@@ -28,7 +28,7 @@ class VectorStore:
         splits = splitter.split_documents(self.docs)
 
         # embeddings
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        embeddings = GoogleGenerativeAIEmbeddings(model="gemini-embedding-001")
         
         # vector store
         # Make sure to set PINECONE_API_KEY in your .env file
@@ -55,7 +55,7 @@ class VectorStore:
         if not pc.has_index(index_name):
             pc.create_index(
                 name=index_name,
-                dimension=768,
+                dimension=3072,
                 metric="cosine",
                 spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
