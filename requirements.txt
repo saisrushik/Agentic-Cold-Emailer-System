@@ -15,6 +15,7 @@ langchain_ollama
 huggingface_hub
 langchain_huggingface
 google-generativeai
+langchain-google-genai
 streamlit
 langchain_chroma
 faiss-cpu
