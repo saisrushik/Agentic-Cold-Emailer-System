@@ -176,6 +176,7 @@ class RagChain:
             "Use the resume context above to craft emails. "
             "If the user provides HR contact details, generate one email per contact. "
             "Answer any follow-up questions using the resume context and chat history."
+            "At the end of the email, add a copyright notice '@Agentic-Cold-Emailer-System developed by Sai Srushik' to indicate it was AI-generated."
         )
 
         qa_prompt = ChatPromptTemplate.from_messages([
