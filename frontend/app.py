@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import sys
+import time
+import uuid
 import tempfile
 from dotenv import load_dotenv
 from langchain_core.callbacks import BaseCallbackHandler
@@ -14,6 +16,7 @@ from rag_pipeline.rag_chain import RagChain, EmailGenerator, ColdEmail, QueryFil
 from rag_pipeline.vector_store import VectorStore
 from data_injection.resume_reader import ResumeReader
 from data_injection.excel_csv import ExcelCsvReader
+from emailer_agent.agent import send_one as agent_send_one
 
 load_dotenv()
 
@@ -132,6 +135,8 @@ st.markdown(
 if "_initialised" not in st.session_state:
     st.session_state._initialised = True
     st.session_state.resume_data = None
+    st.session_state.resume_bytes = None
+    st.session_state.resume_filename = "resume.pdf"
     st.session_state.contact_info = None
     st.session_state.llm_provider = "Groq"
     st.session_state.model_params = {
@@ -147,6 +152,8 @@ if "_initialised" not in st.session_state:
     st.session_state.rag_chain_instance = None
     st.session_state.chat_messages = []
     st.session_state.session_id = "default_session"
+    st.session_state.gmail_app_password = ""
+    st.session_state.sender_name_override = ""
 
 
 # ══════════════════════  SIDEBAR  ══════════════════════════════════════
@@ -212,8 +219,9 @@ with st.sidebar:
         )
 
         if uploaded_file is not None:
+            file_bytes = uploaded_file.getvalue()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(uploaded_file.getvalue())
+                tmp.write(file_bytes)
                 tmp_path = tmp.name
 
             with st.spinner("Parsing resume..."):
@@ -224,6 +232,8 @@ with st.sidebar:
 
             if resume_data:
                 st.session_state.resume_data = resume_data
+                st.session_state.resume_bytes = file_bytes
+                st.session_state.resume_filename = uploaded_file.name or "resume.pdf"
                 try:
                     contact = reader.extract_contact_info(resume_data)
                     st.session_state.contact_info = contact if contact else None
@@ -241,12 +251,55 @@ with st.sidebar:
         )
         if st.button("Discard Resume", type="secondary", use_container_width=True):
             st.session_state.resume_data = None
+            st.session_state.resume_bytes = None
             st.session_state.contact_info = None
             st.session_state.vector_store_db = None
             st.session_state.vector_store_retriever = None
             st.session_state.rag_chain_instance = None
             st.session_state.chat_messages = []
             st.rerun()
+
+    # ── Sender credentials (Gmail SMTP) ──────────────────────────────
+    st.markdown("### Sender (Gmail)")
+    sender_email_from_resume = (
+        (st.session_state.contact_info or {}).get("email") if st.session_state.contact_info else None
+    )
+    if sender_email_from_resume:
+        st.markdown(
+            f"**From:** `{sender_email_from_resume}`  \n"
+            f"<small>Auto-detected from your resume</small>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption(
+            "Upload a resume that contains your email so it can be used "
+            "as the sender address."
+        )
+
+    st.session_state.sender_name_override = st.text_input(
+        "Sender display name",
+        value=st.session_state.get("sender_name_override", ""),
+        placeholder="e.g. Sai Srigiri",
+        help="Shown in the From header. Defaults to your email if left blank.",
+    )
+
+    st.session_state.gmail_app_password = st.text_input(
+        "Gmail App Password",
+        value=st.session_state.get("gmail_app_password", ""),
+        type="password",
+        help=(
+            "Required to send mail through Gmail SMTP from your address. "
+            "Generate one at https://myaccount.google.com/apppasswords "
+            "(2-Step Verification must be enabled). Stored only in this "
+            "browser session — never saved to disk."
+        ),
+    )
+
+    if sender_email_from_resume and st.session_state.gmail_app_password:
+        st.markdown(
+            '<div class="success-banner">Sender ready</div>',
+            unsafe_allow_html=True,
+        )
 
 
 # ══════════════════════  MAIN AREA  ═══════════════════════════════════
@@ -366,14 +419,65 @@ with col1:
 
     # ── Unified Chat (RAG + Email Generation) ─────────────────────────
 
-    def _render_email_results(email_groups, filter_data):
-        """Render multiple tailored email previews grouped by company+role."""
+    def _send_one_email(email_idx_key: str, group: dict) -> None:
+        """Invoke the LangGraph emailer for a single contact."""
+        email_data = group["email"]
+        contact = group["contacts"][0]
+        sender_email = ((st.session_state.contact_info or {}).get("email")) or None
+        sender_password = (st.session_state.get("gmail_app_password") or "").strip() or None
+        sender_name = (st.session_state.get("sender_name_override") or "").strip() or None
+
+        if not sender_email:
+            group["status"] = "failed"
+            group["error"] = (
+                "No sender email detected in the uploaded resume. "
+                "Re-upload a resume that includes your email."
+            )
+            return
+        if not sender_password:
+            group["status"] = "failed"
+            group["error"] = (
+                "Gmail App Password is missing. Enter it in the sidebar "
+                "(Sender section) before sending."
+            )
+            return
+
+        try:
+            result = agent_send_one(
+                to_email=contact.get("Email", ""),
+                recipient_name=contact.get("HR Name/Team", "") or "",
+                company=contact.get("Company", "") or "",
+                role=contact.get("Hiring Role", "") or "",
+                subject=email_data["subject"],
+                greeting=email_data["greeting"],
+                body=email_data["body"],
+                closing=email_data["closing"],
+                signature=email_data["signature"],
+                resume_bytes=st.session_state.get("resume_bytes"),
+                attachment_filename=st.session_state.get("resume_filename", "resume.pdf"),
+                cc_sender=True,
+                sender_email=sender_email,
+                sender_password=sender_password,
+                sender_name=sender_name,
+                thread_id=email_idx_key,
+            )
+            if result.get("status") == "sent":
+                group["status"] = "sent"
+                group["error"] = None
+            else:
+                group["status"] = "failed"
+                group["error"] = result.get("error", "Unknown error")
+        except Exception as e:  # noqa: BLE001
+            group["status"] = "failed"
+            group["error"] = str(e)
+
+    def _render_email_results(msg_id: str, email_groups: list, filter_data) -> None:
+        """Render editable email previews with Approve / Reject / Send controls."""
         if isinstance(filter_data, dict):
             filters = QueryFilter(**filter_data)
         else:
             filters = filter_data
 
-        # Show applied filters
         filter_parts = []
         if filters.company_types:
             filter_parts.append(f"**Company Type:** {', '.join(filters.company_types)}")
@@ -384,36 +488,194 @@ with col1:
 
         total_recipients = sum(len(g["contacts"]) for g in email_groups)
         if filter_parts:
-            st.info(f"Filters: {' | '.join(filter_parts)} — {total_recipients} recipient(s), {len(email_groups)} email(s)")
+            st.info(
+                f"Filters: {' | '.join(filter_parts)} — "
+                f"{total_recipients} recipient(s), {len(email_groups)} email(s)"
+            )
         else:
-            st.info(f"No specific filters — {len(email_groups)} email(s) for {total_recipients} contact(s)")
+            st.info(
+                f"No specific filters — {len(email_groups)} email(s) for "
+                f"{total_recipients} contact(s)"
+            )
 
+        if not st.session_state.get("resume_bytes"):
+            st.warning(
+                "Resume PDF not available in session — re-upload it from the sidebar "
+                "before sending so it can be attached."
+            )
+
+        sender_email_ready = ((st.session_state.contact_info or {}).get("email")) or None
+        if not sender_email_ready:
+            st.warning(
+                "Sender email not detected in your resume. Re-upload a resume "
+                "containing your email so it can be used as the From address."
+            )
+        if not (st.session_state.get("gmail_app_password") or "").strip():
+            st.warning(
+                "Gmail App Password is required to send. Enter it in the sidebar "
+                "under **Sender (Gmail)**."
+            )
+
+        # ── Bulk send button ──
+        pending_count = sum(1 for g in email_groups if g.get("status", "pending") == "pending")
+        approved_count = sum(1 for g in email_groups if g.get("status") == "approved")
+
+        bulk_col1, bulk_col2 = st.columns([3, 1])
+        with bulk_col2:
+            send_all_clicked = st.button(
+                f"Send All Approved ({approved_count})",
+                key=f"send_all_{msg_id}",
+                disabled=approved_count == 0,
+                use_container_width=True,
+            )
+        with bulk_col1:
+            st.caption(
+                f"{approved_count} approved · {pending_count} pending · "
+                f"{sum(1 for g in email_groups if g.get('status') == 'sent')} sent · "
+                f"{sum(1 for g in email_groups if g.get('status') == 'rejected')} rejected · "
+                f"{sum(1 for g in email_groups if g.get('status') == 'failed')} failed"
+            )
+
+        if send_all_clicked:
+            progress = st.progress(0.0, text="Sending approved emails...")
+            approved_groups = [g for g in email_groups if g.get("status") == "approved"]
+            total = len(approved_groups)
+            for i, group in enumerate(approved_groups):
+                contact = group["contacts"][0]
+                progress.progress(
+                    i / max(total, 1),
+                    text=f"Sending to {contact.get('Email','?')} ({i + 1}/{total})",
+                )
+                if i > 0:
+                    time.sleep(2.0)  # 2s delay between sends per Gmail rate limits
+                _send_one_email(f"{msg_id}-{i}", group)
+            progress.progress(1.0, text="Done.")
+            st.rerun()
+
+        # ── Per-email cards ──
         for i, group in enumerate(email_groups):
             email_data = group["email"]
             contacts = group["contacts"]
-            if isinstance(email_data, dict):
-                email = ColdEmail(**email_data)
-            else:
-                email = email_data
+            contact = contacts[0]
+            company = contact.get("Company", "Unknown")
+            role = contact.get("Hiring Role", "Unknown")
+            hr_name = contact.get("HR Name/Team", "Unknown")
+            hr_email = contact.get("Email", "N/A")
 
-            company = contacts[0].get("Company", "Unknown") if contacts else "Unknown"
-            role = contacts[0].get("Hiring Role", "Unknown") if contacts else "Unknown"
-            label = f"{company} — {role} ({len(contacts)} recipient(s))"
+            status = group.get("status", "pending")
+            badge = {
+                "pending": "🟡 pending",
+                "approved": "🟢 approved",
+                "sent": "✅ sent",
+                "rejected": "⛔ rejected",
+                "failed": "❌ failed",
+            }.get(status, status)
 
-            with st.expander(label, expanded=(len(email_groups) == 1)):
-                st.markdown(f"**Subject:** {email.subject}")
-                st.markdown("---")
-                st.markdown(email.greeting)
-                st.markdown(email.body)
-                st.markdown(email.closing)
-                st.markdown(f"*{email.signature}*")
-                st.markdown("---")
-                st.caption("**Recipients:**")
-                for c in contacts:
-                    st.caption(
-                        f"  {c.get('HR Name/Team', 'N/A')} — "
-                        f"{c.get('Email', 'N/A')}"
+            label = f"{badge}  ·  {company} — {role}  ·  {hr_name} <{hr_email}>"
+            expand_default = (status in ("pending", "failed")) and len(email_groups) <= 5
+
+            key_prefix = f"{msg_id}-{i}"
+            editing_key = f"editing_{key_prefix}"
+            if editing_key not in st.session_state:
+                st.session_state[editing_key] = False
+
+            with st.expander(label, expanded=expand_default):
+                if status in ("sent", "rejected"):
+                    st.markdown(f"**Subject:** {email_data['subject']}")
+                    st.markdown("---")
+                    st.markdown(email_data["greeting"])
+                    st.markdown(email_data["body"])
+                    st.markdown(email_data["closing"])
+                    st.markdown(f"*{email_data['signature']}*")
+                    if status == "sent" and group.get("error"):
+                        st.warning(group["error"])
+                    continue
+
+                if status == "failed" and group.get("error"):
+                    st.error(group["error"])
+
+                if st.session_state[editing_key]:
+                    new_subject = st.text_input(
+                        "Subject", value=email_data["subject"], key=f"sub_{key_prefix}"
                     )
+                    new_greeting = st.text_input(
+                        "Greeting", value=email_data["greeting"], key=f"gr_{key_prefix}"
+                    )
+                    new_body = st.text_area(
+                        "Body", value=email_data["body"], height=220, key=f"body_{key_prefix}"
+                    )
+                    new_closing = st.text_input(
+                        "Closing", value=email_data["closing"], key=f"cl_{key_prefix}"
+                    )
+                    new_signature = st.text_area(
+                        "Signature",
+                        value=email_data["signature"],
+                        height=80,
+                        key=f"sig_{key_prefix}",
+                    )
+                    save_col, cancel_col = st.columns(2)
+                    if save_col.button(
+                        "Save Changes", key=f"save_{key_prefix}", use_container_width=True
+                    ):
+                        email_data["subject"] = new_subject
+                        email_data["greeting"] = new_greeting
+                        email_data["body"] = new_body
+                        email_data["closing"] = new_closing
+                        email_data["signature"] = new_signature
+                        st.session_state[editing_key] = False
+                        st.rerun()
+                    if cancel_col.button(
+                        "Cancel", key=f"cancel_{key_prefix}", use_container_width=True
+                    ):
+                        st.session_state[editing_key] = False
+                        st.rerun()
+                else:
+                    st.markdown(f"**Subject:** {email_data['subject']}")
+                    st.markdown("---")
+                    st.markdown(email_data["greeting"])
+                    st.markdown(email_data["body"])
+                    st.markdown(email_data["closing"])
+                    st.markdown(f"*{email_data['signature']}*")
+                    st.markdown("---")
+                    sender_email_display = (
+                        ((st.session_state.contact_info or {}).get("email")) or "(not detected)"
+                    )
+                    st.caption(
+                        f"**From:** {sender_email_display}  ·  "
+                        f"**To:** {hr_name} <{hr_email}>  ·  "
+                        f"**CC:** {sender_email_display} (auto)  ·  "
+                        f"**Attachment:** {st.session_state.get('resume_filename', 'resume.pdf')}"
+                    )
+
+                    btn_edit, btn_approve, btn_send, btn_reject = st.columns(4)
+                    if btn_edit.button(
+                        "Edit", key=f"edit_{key_prefix}", use_container_width=True
+                    ):
+                        st.session_state[editing_key] = True
+                        st.rerun()
+                    if btn_approve.button(
+                        "Approve",
+                        key=f"approve_{key_prefix}",
+                        use_container_width=True,
+                        disabled=status == "approved",
+                    ):
+                        group["status"] = "approved"
+                        st.rerun()
+                    if btn_send.button(
+                        "Approve & Send",
+                        key=f"send_{key_prefix}",
+                        use_container_width=True,
+                        type="primary",
+                    ):
+                        group["status"] = "approved"
+                        with st.spinner(f"Sending to {hr_email}..."):
+                            _send_one_email(key_prefix, group)
+                        st.rerun()
+                    if btn_reject.button(
+                        "Reject", key=f"rej_{key_prefix}", use_container_width=True
+                    ):
+                        group["status"] = "rejected"
+                        st.rerun()
 
     st.markdown("#### Chat")
 
@@ -438,7 +700,9 @@ with col1:
         for msg in st.session_state.chat_messages:
             with st.chat_message(msg["role"]):
                 if msg.get("type") == "email":
-                    _render_email_results(msg["email_groups"], msg["filters"])
+                    _render_email_results(
+                        msg["msg_id"], msg["email_groups"], msg["filters"]
+                    )
                 else:
                     st.markdown(msg.get("content", ""))
 
@@ -479,17 +743,24 @@ with col1:
                                 callbacks=[st_callback],
                             )
                             email_groups = [
-                                {"email": email.model_dump(), "contacts": contacts}
+                                {
+                                    "email": email.model_dump(),
+                                    "contacts": contacts,
+                                    "status": "pending",
+                                    "error": None,
+                                }
                                 for email, contacts in email_groups_raw
                             ]
                             thinking_status.update(
                                 label="Done", state="complete", expanded=False
                             )
                             response_placeholder.empty()
-                            _render_email_results(email_groups, filters)
+                            msg_id = uuid.uuid4().hex[:8]
+                            _render_email_results(msg_id, email_groups, filters)
                             st.session_state.chat_messages.append({
                                 "role": "assistant",
                                 "type": "email",
+                                "msg_id": msg_id,
                                 "email_groups": email_groups,
                                 "filters": filters.model_dump(),
                             })

@@ -31,4 +31,5 @@ dependencies = [
     "streamlit>=1.56.0",
     "pinecone-client>=6.0.0",
     "langchain-pinecone>=0.2.13",
+    "langgraph>=1.1.9",
 ]

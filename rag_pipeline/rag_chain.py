@@ -355,38 +355,34 @@ class EmailGenerator:
         retrieved_docs = self.vector_store_retriever.invoke(user_query)
         resume_context = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
-        # Step 4: Group by (Company, Hiring Role)
+        # Step 4: One email per contact (personalised greeting per HR person)
         sorted_records = sorted(
             filtered,
-            key=lambda r: (r.get("Company", ""), r.get("Hiring Role", "")),
+            key=lambda r: (r.get("Company", ""), r.get("Hiring Role", ""), r.get("HR Name/Team", "")),
         )
-        groups: list[tuple[str, str, list[dict]]] = []
-        for (company, role), grp in groupby(
-            sorted_records,
-            key=lambda r: (r.get("Company", ""), r.get("Hiring Role", "")),
-        ):
-            groups.append((company, role, list(grp)))
 
-        # Step 5: Generate one tailored email per group
+        # Step 5: Generate one tailored email per individual contact
         llm = build_llm(self.model_params, streaming=True, callbacks=callbacks)
         structured_llm = llm.with_structured_output(ColdEmail)
 
         results: list[tuple[ColdEmail, list[dict]]] = []
-        for company, role, group_records in groups:
-            hr_names = [r.get("HR Name/Team", "N/A") for r in group_records]
-            company_type = group_records[0].get("Company_Type", "") or "N/A"
+        for record in sorted_records:
+            company = record.get("Company", "Unknown")
+            role = record.get("Hiring Role", "Unknown")
+            hr_name = record.get("HR Name/Team", "N/A")
+            company_type = record.get("Company_Type", "") or "N/A"
 
             system_prompt = (
                 "You are an expert cold-email copywriter for job seekers.\n\n"
                 "Generate exactly ONE professional cold email for the target described below.\n\n"
                 "Guidelines:\n"
                 "- GREETING RULES (critical):\n"
-                "  * If there is exactly ONE recipient and the name is a person's name "
-                "(e.g., 'Priya', 'John', 'Rahul Sharma'), use 'Dear <name>,' (e.g., 'Dear Priya,').\n"
+                "  * If the recipient name looks like a real person's name "
+                "(e.g., 'Priya', 'John', 'Rahul Sharma'), use 'Dear <FirstName>,' "
+                "(e.g., 'Dear Priya,').\n"
                 "  * If the name looks like a team or department "
                 "(e.g., 'HR Team', 'Talent Acquisition', 'Recruitment Team'), "
                 "use 'Dear Hiring Team,' or 'Dear Talent Acquisition Team,'.\n"
-                "  * If there are MULTIPLE recipients, use 'Dear Hiring Team,'.\n"
                 "- MENTION the specific company name and role in the email body naturally.\n"
                 "- NO LINKS: The email must NOT contain any URLs, hyperlinks, portfolio links, "
                 "GitHub links, LinkedIn links, or any web addresses. Emails with links will bounce.\n"
@@ -402,12 +398,9 @@ class EmailGenerator:
                 f"Target Company: {company}\n"
                 f"Company Type: {company_type}\n"
                 f"Hiring Role: {role}\n"
-                f"HR/TA Contact(s): {', '.join(hr_names)}"
+                f"Recipient (HR/TA): {hr_name}"
             )
 
-            # Invoke directly with messages to avoid ChatPromptTemplate
-            # interpreting any literal '{...}' inside resume/HR data as template
-            # variables (which caused missing-variable errors).
             messages = [
                 SystemMessage(content=system_prompt),
                 HumanMessage(content=user_query),
@@ -416,7 +409,7 @@ class EmailGenerator:
                 messages,
                 config={"callbacks": callbacks or []},
             )
-            results.append((email, group_records))
+            results.append((email, [record]))
 
         return results, filters
 
